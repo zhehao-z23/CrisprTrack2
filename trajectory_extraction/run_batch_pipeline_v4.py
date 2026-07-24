@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v4.2.0-candidate-preserving-qc"
+VERSION = "v4.2.1-nd2-frame-timestamps"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 

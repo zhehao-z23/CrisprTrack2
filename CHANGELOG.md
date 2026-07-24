@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.2.1-nd2-frame-timestamps — 2026-07-24
+
+- Read exact per-timepoint acquisition timestamps from ND2 frame metadata,
+  including acquisitions represented by `NETimeLoop`.
+- Store the complete relative-time axis and observed frame intervals in every
+  crop metadata sidecar.
+- Use the median observed interval as the representative ImageJ TIFF interval,
+  while retaining the exact nonuniform timestamps for downstream analysis.
+- Treat `periodMs` and `periodDiff.avg` consistently as milliseconds when exact
+  frame metadata is unavailable.
+
 ## 4.2.0-candidate-preserving-qc — 2026-07-22
 
 - Preserve every unmodified micro-SAM instance by default in a separate output tree,

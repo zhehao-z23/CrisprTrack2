@@ -48,6 +48,81 @@ def _parse_exposures(text_info: dict, num_channels: int) -> list:
     return exposures
 
 
+def _frame_relative_time_ms(frame_metadata):
+    """Return the earliest channel timestamp recorded for one ND2 frame."""
+    if isinstance(frame_metadata, dict):
+        channels = frame_metadata.get('channels', [])
+    else:
+        channels = getattr(frame_metadata, 'channels', [])
+
+    values = []
+    for channel in channels:
+        if isinstance(channel, dict):
+            time = channel.get('time', {})
+            value = time.get('relativeTimeMs') if isinstance(time, dict) else None
+        else:
+            time = getattr(channel, 'time', None)
+            value = getattr(time, 'relativeTimeMs', None)
+        if value is not None:
+            value = float(value)
+            if np.isfinite(value):
+                values.append(value)
+    return min(values) if values else None
+
+
+def _extract_frame_times(f, n_timepoints: int):
+    """Extract acquisition-start timestamps for every T index from frame metadata."""
+    if n_timepoints < 1:
+        return None
+
+    by_timepoint = {index: [] for index in range(n_timepoints)}
+    try:
+        for seq_index, loop_index in enumerate(f.loop_indices):
+            t_index = int(loop_index.get('T', 0))
+            if t_index not in by_timepoint:
+                continue
+            value = _frame_relative_time_ms(f.frame_metadata(seq_index))
+            if value is not None:
+                by_timepoint[t_index].append(value)
+    except Exception as exc:
+        print(f"  WARNING: exact ND2 frame timestamps unavailable: {exc}")
+        return None
+
+    if any(not by_timepoint[index] for index in range(n_timepoints)):
+        return None
+
+    # A timepoint can contain multiple Z planes. Its acquisition time is the
+    # earliest recorded frame/channel timestamp for that T index.
+    relative_ms = [min(by_timepoint[index]) for index in range(n_timepoints)]
+    origin_ms = relative_ms[0]
+    relative_s = [(value - origin_ms) / 1000.0 for value in relative_ms]
+    if any(right <= left for left, right in zip(relative_s, relative_s[1:])):
+        print("  WARNING: ND2 frame timestamps are not strictly increasing")
+        return None
+    return relative_s
+
+
+def _experiment_interval_s(experiment):
+    """Return a measured/requested interval fallback from TimeLoop or NETimeLoop."""
+    try:
+        for loop in experiment:
+            if not getattr(loop, 'type', '').lower().endswith('timeloop'):
+                continue
+            parameters = loop.parameters
+            periods = getattr(parameters, 'periods', None) or [parameters]
+            for period in periods:
+                avg_ms = getattr(
+                    getattr(period, 'periodDiff', None), 'avg', None)
+                if avg_ms is not None and float(avg_ms) > 0:
+                    return float(avg_ms) / 1000.0, 'experiment.periodDiff.avg'
+                period_ms = getattr(period, 'periodMs', None)
+                if period_ms is not None and float(period_ms) > 0:
+                    return float(period_ms) / 1000.0, 'experiment.periodMs'
+    except Exception as exc:
+        print(f"  WARNING: ND2 experiment interval unavailable: {exc}")
+    return None, None
+
+
 """
 load_fov_with_metadata() loads an nd2 plus all metadata needed for TIFF export.
 Inputs:  nd2_path — path to the .nd2 file
@@ -82,31 +157,20 @@ def load_fov_with_metadata(nd2_path: Path):
         except Exception:
             px_um_x = px_um_y = px_um_z = 1.0
 
-        # Frame interval: level 1 = periodMs (requested), level 2 = periodDiff.avg (measured)
-        # periodMs and periodDiff.avg are both in ms (confirmed: periodDiff.avg ≈ 24426 ms
-        # for ~24.4 s/frame experiments). Values > 1000 are treated as ms → divide by 1000.
-        finterval_s = None
-        try:
-            for loop in f.experiment:
-                if getattr(loop, 'type', '').lower().startswith('time'):
-                    parameters = loop.parameters
-                    periods = getattr(parameters, 'periods', None) or []
-                    period = periods[0] if periods else parameters
-                    period_ms = getattr(period, 'periodMs', None) \
-                                or getattr(period, 'period', None)
-                    if period_ms:
-                        val = float(period_ms)
-                        finterval_s = val / 1000.0 if val > 1000 else val
-                        break
-                    avg = getattr(
-                        getattr(period, 'periodDiff', None), 'avg', None)
-                    if avg and avg > 0:
-                        val = float(avg)
-                        finterval_s = val / 1000.0 if val > 1000 else val
-                        print(f"  periodDiff.avg: {val} → finterval_s = {finterval_s:.4f} s")
-                        break
-        except Exception:
-            pass
+        n_timepoints = int(f.sizes.get('T', 1))
+        frame_times_s = _extract_frame_times(f, n_timepoints)
+        if frame_times_s is not None and len(frame_times_s) > 1:
+            frame_intervals_s = np.diff(frame_times_s).astype(float).tolist()
+            finterval_s = float(np.median(frame_intervals_s))
+            finterval_source = 'frame_metadata.relativeTimeMs.median'
+        else:
+            frame_intervals_s = []
+            finterval_s, finterval_source = _experiment_interval_s(f.experiment)
+
+        if frame_times_s is not None:
+            print(
+                f"  Exact frame timestamps: n={len(frame_times_s)}, "
+                f"representative interval={finterval_s} s")
 
         # Per-channel nd2 display ranges (componentMinima/Maxima — often 0.0)
         nd2_ranges = []
@@ -207,6 +271,9 @@ def load_fov_with_metadata(nd2_path: Path):
         'px_um_y':          px_um_y,
         'px_um_z':          px_um_z,
         'finterval_s':      finterval_s,
+        'finterval_source': finterval_source,
+        'frame_times_s':     frame_times_s,
+        'frame_intervals_s': frame_intervals_s,
         'chan_names':       chan_names,
         'luts':             luts,
         'display_ranges':   ranges_flat,
@@ -270,9 +337,12 @@ def _write_sidecar(path: Path, nd2_path: Path, stem: str, idx: int,
             'z_um': meta['px_um_z'],
         },
         'time': {
-            'finterval_s': meta['finterval_s'],
-            'fps':         1.0 / meta['finterval_s'] if meta['finterval_s'] else None,
-            'n_frames':    T,
+            'finterval_s':       meta['finterval_s'],
+            'finterval_source':  meta['finterval_source'],
+            'fps':               1.0 / meta['finterval_s'] if meta['finterval_s'] else None,
+            'n_frames':          T,
+            'relative_time_s':   meta['frame_times_s'],
+            'frame_intervals_s': meta['frame_intervals_s'],
         },
         'acquisition': {
             'objective':     meta['objective_name'],

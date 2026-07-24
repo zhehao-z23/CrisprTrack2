@@ -10,6 +10,8 @@
   while retaining the exact nonuniform timestamps for downstream analysis.
 - Treat `periodMs` and `periodDiff.avg` consistently as milliseconds when exact
   frame metadata is unavailable.
+- Add a metadata-only ND2 audit command that checks channel contracts, exact
+  timestamp coverage and nonuniform-time review flags without loading pixels.
 
 ## 4.2.0-candidate-preserving-qc — 2026-07-22
 

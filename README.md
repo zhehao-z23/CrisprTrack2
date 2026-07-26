@@ -1,6 +1,6 @@
 # OligoLiveFish: ND2 to cleaned SPT trajectories
 
-Current production version: **v4.2.1-nd2-frame-timestamps**.
+Current production version: **v4.2.2-convex-hull-roi**.
 
 This repository converts a time-lapse Oligo-LiveFISH ND2 acquisition into
 single-cell, sub-pixel trajectories. The documented scope ends at trajectory
@@ -356,6 +356,7 @@ sensitivity values but are **not** silently applied.
 | `--experiment-profile` | required | `chr3_sites_2_3_4` or `dsb_53bp1_site1_site2`; locks channel identity and anchor. |
 | `--microsam-mask` | associated mask | Explicit mask override; normally do not use. |
 | `--mask-dilation-px` | `5` | Expansion after drift alignment. |
+| `--roi-geometry` | `tube` | Static anchor ROI seed: ordered-path `tube`, or filled `convex_hull`. |
 | `--roi-dilation-px` | `5` | Anchor centerline expansion; minimum `5`. |
 | `--d-star` | `0.0041` | Anomalous diffusion prior in `um^2/s^alpha`. |
 | `--alpha` | `0.38` | Anomalous exponent. |
@@ -370,6 +371,13 @@ sensitivity values but are **not** silently applied.
 Changing a scientific parameter requires a fresh run and a recorded reason.
 The runner removes only its own generated profile-namespaced v4 subdirectories before
 a rerun; archive a completed result first if it must be retained.
+
+`--roi-geometry convex_hull` preserves the complete anchor path but fills its
+concavities before dilation. The result is still intersected with the aligned
+micro-SAM support, so it cannot extend outside the accepted cell mask. Convex-hull
+results are isolated under
+`anchor_roi_v4_<experiment_profile>_convex_hull`; the backward-compatible tube
+result remains under `anchor_roi_v4_<experiment_profile>`.
 
 ## Step 5 — inspect automatic QC and cleaned baselines
 

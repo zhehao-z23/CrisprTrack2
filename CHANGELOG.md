@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.2.2-convex-hull-roi — 2026-07-25
+
+- Add an explicit `tube` versus `convex_hull` static anchor-ROI option.
+- Fill anchor-path concavities before dilation for the convex-hull policy, then
+  retain the existing intersection with aligned micro-SAM support.
+- Store convex-hull runs in a separate result directory so existing tube
+  results are never overwritten.
+- Record ROI geometry in run manifests, summaries and geometry audits.
+- Resolve candidate-selection symlinks before batch resume checks.
+
 ## 4.2.1-nd2-frame-timestamps — 2026-07-24
 
 - Read exact per-timepoint acquisition timestamps from ND2 frame metadata,

@@ -203,6 +203,34 @@ class StaticRoiTests(unittest.TestCase):
                 [(1, 5.0, 5.0)], np.ones((10, 10), dtype=bool), 4
             )
 
+    def test_convex_hull_fills_anchor_path_concavity(self):
+        support = np.ones((50, 50), dtype=bool)
+        anchor = [
+            (1, 10.0, 10.0),
+            (2, 10.0, 30.0),
+            (3, 30.0, 30.0),
+        ]
+        tube = run_anchor_roi_spt.static_anchor_roi(
+            anchor, support, 5, "tube"
+        )
+        hull = run_anchor_roi_spt.static_anchor_roi(
+            anchor, support, 5, "convex_hull"
+        )
+        self.assertTrue(np.all(hull[tube]))
+        self.assertFalse(tube[24, 20])
+        self.assertTrue(hull[24, 20])
+        self.assertGreater(int(hull.sum()), int(tube.sum()))
+
+    def test_both_geometries_are_clipped_to_microsam_support(self):
+        support = np.zeros((40, 40), dtype=bool)
+        support[5:30, 5:30] = True
+        anchor = [(1, 8.0, 8.0), (2, 28.0, 8.0), (3, 28.0, 28.0)]
+        for geometry in ("tube", "convex_hull"):
+            roi = run_anchor_roi_spt.static_anchor_roi(
+                anchor, support, 5, geometry
+            )
+            self.assertFalse(np.any(roi & ~support))
+
 
 class MaskAssociationTests(unittest.TestCase):
     def test_sidecar_resolves_exact_relative_mask(self):

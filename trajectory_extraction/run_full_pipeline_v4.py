@@ -27,7 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.2.1-nd2-frame-timestamps"
+VERSION = "v4.2.2-convex-hull-roi"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"
@@ -93,6 +93,15 @@ def parse_args() -> argparse.Namespace:
         help="Required locked biological channel contract; it determines the anchor automatically.",
     )
     parser.add_argument("--mask-dilation-px", type=int, default=5)
+    parser.add_argument(
+        "--roi-geometry",
+        choices=("tube", "convex_hull"),
+        default="tube",
+        help=(
+            "Static anchor ROI geometry. Tube preserves the v4.2.1 behavior; "
+            "convex_hull writes to an isolated result directory."
+        ),
+    )
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)
@@ -130,7 +139,10 @@ def main() -> None:
     profile = experiment_profiles.get_profile(args.experiment_profile)
     profile_validation = profile.validate_crop(crop_tiff)
     anchor_channel = profile.anchor_channel
-    results_dir = analysis_dir / f"anchor_roi_v4_{profile.name}"
+    geometry_suffix = "" if args.roi_geometry == "tube" else "_convex_hull"
+    results_dir = analysis_dir / (
+        f"anchor_roi_v4_{profile.name}{geometry_suffix}"
+    )
     results_dir.mkdir(parents=True, exist_ok=True)
     for name in (
         "mask_alignment",
@@ -223,6 +235,8 @@ def main() -> None:
                 str(results_dir),
                 "--experiment-profile",
                 profile.name,
+                "--roi-geometry",
+                args.roi_geometry,
                 "--roi-dilation-px",
                 str(args.roi_dilation_px),
                 "--matlab-bin",

@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v4.2.1-nd2-frame-timestamps"
+VERSION = "v4.2.2-convex-hull-roi"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 
@@ -51,6 +51,7 @@ def scientific_options(args: argparse.Namespace) -> dict:
     return {
         "experiment_profile": args.experiment_profile,
         "mask_dilation_px": args.mask_dilation_px,
+        "roi_geometry": args.roi_geometry,
         "roi_dilation_px": args.roi_dilation_px,
         "d_star": args.d_star,
         "alpha": args.alpha,
@@ -65,9 +66,10 @@ def scientific_options(args: argparse.Namespace) -> dict:
 
 
 def completion_matches(analysis_dir: Path, args: argparse.Namespace) -> bool:
+    geometry_suffix = "" if args.roi_geometry == "tube" else "_convex_hull"
     path = (
         analysis_dir
-        / f"anchor_roi_v4_{args.experiment_profile}"
+        / f"anchor_roi_v4_{args.experiment_profile}{geometry_suffix}"
         / "run_manifest.json"
     )
     if not path.is_file():
@@ -83,12 +85,11 @@ def completion_matches(analysis_dir: Path, args: argparse.Namespace) -> bool:
         return False
 
 
-def tail_log(
-    analysis_dir: Path, experiment_profile: str, line_count: int = 25
-) -> str:
+def tail_log(analysis_dir: Path, args: argparse.Namespace, line_count: int = 25) -> str:
+    geometry_suffix = "" if args.roi_geometry == "tube" else "_convex_hull"
     path = (
         analysis_dir
-        / f"anchor_roi_v4_{experiment_profile}"
+        / f"anchor_roi_v4_{args.experiment_profile}{geometry_suffix}"
         / "log_anchor_roi_v4.txt"
     )
     if not path.is_file():
@@ -97,7 +98,9 @@ def tail_log(
 
 
 def run_cell(crop: Path, args: argparse.Namespace) -> dict:
-    analysis_dir = crop.with_suffix("")
+    # Selection views contain symlinks into the immutable candidate archive.
+    # Resolve first so resume checks and the child runner inspect the same result.
+    analysis_dir = crop.resolve().with_suffix("")
     if args.resume and completion_matches(analysis_dir, args):
         return {
             "crop": str(crop), "analysis_dir": str(analysis_dir), "status": "skipped_complete",
@@ -111,6 +114,7 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         "--matlab-workers", str(args.matlab_workers),
         "--experiment-profile", args.experiment_profile,
         "--mask-dilation-px", str(args.mask_dilation_px),
+        "--roi-geometry", args.roi_geometry,
         "--roi-dilation-px", str(args.roi_dilation_px),
         "--d-star", str(args.d_star),
         "--alpha", str(args.alpha),
@@ -132,7 +136,7 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         exit_code = int(result.returncode)
         status = "complete" if exit_code == 0 else "failed"
         error_tail = "" if exit_code == 0 else tail_log(
-            analysis_dir, args.experiment_profile
+            analysis_dir, args
         )
     except Exception as exc:
         exit_code, status, error_tail = -1, "failed_to_start", repr(exc)
@@ -172,6 +176,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--matlab-save-filter-images", action="store_true")
     parser.add_argument("--mask-dilation-px", type=int, default=5)
+    parser.add_argument(
+        "--roi-geometry",
+        choices=("tube", "convex_hull"),
+        default="tube",
+    )
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)

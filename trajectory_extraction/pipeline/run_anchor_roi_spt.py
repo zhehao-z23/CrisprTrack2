@@ -20,6 +20,7 @@ import scipy.io as sio
 import tifffile
 from scipy import ndimage
 from skimage.draw import line
+from skimage.morphology import convex_hull_image
 
 import max_step_model
 import experiment_profiles
@@ -30,7 +31,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.2.1-nd2-frame-timestamps"
+VERSION = "v4.2.2-convex-hull-roi"
 HERE = Path(__file__).resolve().parent
 MATLAB_DEPS = HERE / "matlab_deps"
 CHANNELS = ("green", "red", "purple")
@@ -97,17 +98,20 @@ def locus_number(path: Path) -> int:
     return int(match.group(1))
 
 
-def static_anchor_union(
+def static_anchor_roi(
     anchor: list[tuple[int, float, float]],
     nucleus_support_2d: np.ndarray,
     dilation_px: int,
+    geometry: str = "tube",
 ) -> np.ndarray:
-    """Rasterize the complete anchor path into one static connected ROI."""
+    """Build one static ROI from the complete anchor path."""
     if dilation_px < MIN_ROI_DILATION_PX:
         raise ValueError(
             f"ROI dilation must be >= {MIN_ROI_DILATION_PX} px so the "
             f"{GAUSSIAN_FIT_BOX_SIZE_PX}px-wide Gaussian fit box is not under-supported"
         )
+    if geometry not in {"tube", "convex_hull"}:
+        raise ValueError(f"Unknown ROI geometry: {geometry}")
     centerline = np.zeros_like(nucleus_support_2d, dtype=bool)
     points = [(int(round(y)), int(round(x))) for _frame, x, y in anchor]
     for y, x in points:
@@ -122,7 +126,28 @@ def static_anchor_union(
             & (columns < centerline.shape[1])
         )
         centerline[rows[valid], columns[valid]] = True
-    return ndimage.binary_dilation(centerline, iterations=dilation_px) & nucleus_support_2d
+    roi_seed = (
+        centerline
+        if geometry == "tube"
+        else convex_hull_image(centerline)
+    )
+    return ndimage.binary_dilation(
+        roi_seed, iterations=dilation_px
+    ) & nucleus_support_2d
+
+
+def static_anchor_union(
+    anchor: list[tuple[int, float, float]],
+    nucleus_support_2d: np.ndarray,
+    dilation_px: int,
+) -> np.ndarray:
+    """Backward-compatible name for the original tube ROI."""
+    return static_anchor_roi(
+        anchor,
+        nucleus_support_2d,
+        dilation_px,
+        geometry="tube",
+    )
 
 
 def partition_channels(worker_count: int) -> list[list[str]]:
@@ -419,6 +444,16 @@ def parse_args() -> argparse.Namespace:
         choices=experiment_profiles.profile_choices(),
         required=True,
     )
+    parser.add_argument(
+        "--roi-geometry",
+        choices=("tube", "convex_hull"),
+        default="tube",
+        help=(
+            "Static ROI seed: the temporally ordered anchor-path tube "
+            "(backward-compatible default), or the filled convex hull of "
+            "that path. Both are dilated and intersected with micro-SAM support."
+        ),
+    )
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--matlab-bin", default="matlab")
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
@@ -505,13 +540,22 @@ def main() -> None:
     for allele_index, anchor_path in enumerate(anchor_paths, start=1):
         anchor_locus = locus_number(anchor_path)
         anchor = read_track_px(anchor_path, pixel_size_nm)
-        roi = static_anchor_union(anchor, aligned_mask[0], args.roi_dilation_px)
+        roi = static_anchor_roi(
+            anchor,
+            aligned_mask[0],
+            args.roi_dilation_px,
+            args.roi_geometry,
+        )
         components = int(ndimage.label(roi)[1])
         if components != 1:
             raise RuntimeError(
                 f"Allele {allele_index}/loci{anchor_locus} ROI has {components} components"
             )
-        roi_path = roi_dir / f"allele_{allele_index:03d}_loci{anchor_locus}_static_anchor_roi.tif"
+        roi_label = "roi" if args.roi_geometry == "tube" else "convex_hull"
+        roi_path = roi_dir / (
+            f"allele_{allele_index:03d}_loci{anchor_locus}_"
+            f"static_anchor_{roi_label}.tif"
+        )
         tifffile.imwrite(roi_path, roi.astype(np.uint8) * 255)
         rows, columns = np.where(roi)
         roi_rows.append(
@@ -527,6 +571,7 @@ def main() -> None:
                 "anchor_fluorophore": profile.anchor.fluorophore,
                 "anchor_csv": str(anchor_path.resolve()),
                 "anchor_points": len(anchor),
+                "roi_geometry": args.roi_geometry,
                 "roi_dilation_px": args.roi_dilation_px,
                 "gaussian_fit_box_size_px": GAUSSIAN_FIT_BOX_SIZE_PX,
                 "nucleus_support": "frame 1 of drift-aligned dilated micro-SAM mask",
@@ -598,7 +643,13 @@ def main() -> None:
         "anchor_raw_channel_index": profile.anchor.raw_index,
         "anchor_marker": profile.anchor.marker,
         "anchor_count": len(anchor_paths),
-        "static_irregular_roi_rule": "complete anchor path connected, dilated, intersected with frame-1 aligned micro-SAM support, reused for every frame",
+        "roi_geometry": args.roi_geometry,
+        "static_roi_rule": (
+            "complete temporally ordered anchor path used as a centerline"
+            if args.roi_geometry == "tube"
+            else "filled convex hull of the complete temporally ordered anchor path"
+        )
+        + ", dilated, intersected with frame-1 aligned micro-SAM support, reused for every frame",
         "roi_dilation_px": args.roi_dilation_px,
         "candidate_matching_to_reference_used": False,
         "baseline_rule": "longest candidate independently within each allele/channel; no cleaned/manual input",

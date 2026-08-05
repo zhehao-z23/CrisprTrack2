@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run v4 static anchor-ROI SPT and select a deterministic longest baseline."""
+"""Run v5 static anchor-ROI SPT and select a deterministic longest baseline."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.2.2-convex-hull-roi"
+VERSION = "v5.0.0-dev1-trackmem-global-gap"
 HERE = Path(__file__).resolve().parent
 MATLAB_DEPS = HERE / "matlab_deps"
 CHANNELS = ("green", "red", "purple")

@@ -80,7 +80,18 @@ end
 param.dim   = 2;
 param.good  = mtl+1;
 param.quiet = 1;
-jump = find(t_posnew);
+% Legacy v4 split the detection table at every globally empty frame before
+% calling track.m.  That made sptpara.trackMem ineffective for a frame in
+% which no particles were detected anywhere in the ROI.  Keep gaps within
+% the configured memory in one block, and split only when the number of
+% globally missing frames is larger than trackMem.
+%
+% track.m iterates over unique detection times rather than the absolute
+% frame grid, so this explicit boundary is also important: removing all
+% pre-segmentation would allow linking across arbitrarily long global gaps.
+% Gap-dependent search radii are intentionally NOT introduced in this v5
+% experiment; allowed gaps still use the existing fixed max_disp.
+jump = find(t_posnew > param.mem);
 trajlist=[];
 % track if all frames are consecitive
 if isempty(jump)

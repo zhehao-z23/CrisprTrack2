@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run v4.1 profile-locked irregular-ROI SPT for one cropped cell TIFF."""
+"""Run the v5 profile-locked irregular-ROI SPT for one cropped cell TIFF."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v4.2.2-convex-hull-roi"
+VERSION = "v5.0.0-dev1-trackmem-global-gap"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"

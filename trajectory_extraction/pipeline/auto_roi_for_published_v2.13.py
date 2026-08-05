@@ -28,6 +28,7 @@ Outputs (same naming as v2.8 / v2.10 / v2.11 / v2.12):
 import argparse
 import sys
 import csv
+import json
 import struct
 import zipfile
 from collections import defaultdict
@@ -44,11 +45,28 @@ for _stream in (sys.stdout, sys.stderr):
 # ║  PARAMETERS  —  edit these to tune the analysis                         ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
-K_SIGNAL = {
+REFERENCE_SEED_K = {
+    'green':  2.0,
+    'red':    0.5,
+    'purple': 1.645,
+}
+
+REFERENCE_TRACKING_K = {
     'green':  2.0,
     'red':    0.5,
     'purple': 0.5,
 }
+
+TARGET_TRACKING_K = {
+    'green':  2.0,
+    'red':    0.5,
+    'purple': 0.5,
+}
+
+REFERENCE_MASK_OCCUPANCY_FRACTION = 0.50
+REFERENCE_CONTAINMENT_FRACTION = 1.0
+REFERENCE_EDGE_WIDTH_PX = 3.0
+REFERENCE_MAX_EDGE_FRACTION = 0.10
 
 CHANNELS = ('green', 'red', 'purple')
 CHANNEL_PREFIX = {'green': 'G', 'red': 'R', 'purple': 'P'}
@@ -299,32 +317,87 @@ def point_in_mask(y: float, x: float, mask: np.ndarray) -> bool:
     return False
 
 
-def detect_signal_clusters(avg: np.ndarray, k: float, min_px: int, n_max: int) -> list:
+def detect_signal_clusters(
+    avg: np.ndarray,
+    k: float,
+    min_px: int,
+    n_max: int,
+    nucleus_mask: np.ndarray,
+    edge_width_px: float,
+    maximum_edge_fraction: float,
+) -> tuple[list, dict]:
     """
     Threshold the time-averaged image at mean + k×std, find connected components
     >= min_px pixels.  Returns up to n_max cluster dicts sorted by mean intensity
     (brightest first).  Each dict: centroid (y,x), bbox, intensity, size.
     """
-    valid  = compute_valid_mask(avg)
-    m, s   = avg[valid].mean(), avg[valid].std()
-    labeled, n = ndimage.label((avg > (m + k * s)) & valid)
+    valid = compute_valid_mask(avg)
+    mean = float(avg[valid].mean())
+    standard_deviation = float(avg[valid].std())
+    threshold = mean + k * standard_deviation
+    labeled, component_count = ndimage.label((avg > threshold) & valid)
+    distance_inside = ndimage.distance_transform_edt(nucleus_mask)
     clusters = []
-    for idx in range(1, n + 1):
-        comp = labeled == idx
-        size = int(comp.sum())
+    area_eligible = 0
+    containment_rejected = 0
+    edge_rejected = 0
+    for label_id in range(1, component_count + 1):
+        component = labeled == label_id
+        size = int(component.sum())
         if size < min_px:
             continue
-        cy, cx = ndimage.center_of_mass(avg * comp)
-        rows, cols = np.where(comp)
+        area_eligible += 1
+        inside_fraction = float((component & nucleus_mask).sum() / size)
+        if inside_fraction < REFERENCE_CONTAINMENT_FRACTION:
+            containment_rejected += 1
+            continue
+        edge_fraction = float((distance_inside[component] <= edge_width_px).mean())
+        if edge_fraction > maximum_edge_fraction:
+            edge_rejected += 1
+            continue
+        cy, cx = ndimage.center_of_mass(avg, labeled, label_id)
+        rows, columns = np.where(component)
         clusters.append({
-            'centroid':  (cy, cx),
-            'bbox':      (int(rows.min()), int(cols.min()),
-                          int(rows.max()), int(cols.max())),
-            'intensity': float(avg[comp].mean()),
-            'size':      size,
+            'centroid': (float(cy), float(cx)),
+            'bbox': (
+                int(rows.min()), int(columns.min()),
+                int(rows.max()), int(columns.max()),
+            ),
+            'intensity': float(avg[component].mean()),
+            'size': size,
+            'inside_fraction': inside_fraction,
+            'edge_fraction': edge_fraction,
         })
-    clusters.sort(key=lambda c: c['intensity'], reverse=True)
-    return clusters[:n_max]
+    clusters.sort(key=lambda cluster: cluster['intensity'], reverse=True)
+    returned = clusters[:n_max]
+    audit = {
+        'threshold_mean': mean,
+        'threshold_std': standard_deviation,
+        'seed_k': float(k),
+        'threshold': float(threshold),
+        'minimum_area_px': int(min_px),
+        'global_area_eligible_components': int(area_eligible),
+        'containment_fraction_required': REFERENCE_CONTAINMENT_FRACTION,
+        'containment_rejected_components': int(containment_rejected),
+        'edge_width_px': float(edge_width_px),
+        'maximum_edge_fraction': float(maximum_edge_fraction),
+        'edge_rejected_components': int(edge_rejected),
+        'survivors_before_top_n': int(len(clusters)),
+        'top_n': int(n_max),
+        'returned_components': [
+            {
+                'rank': rank,
+                'centroid_y_px': cluster['centroid'][0],
+                'centroid_x_px': cluster['centroid'][1],
+                'size_px': cluster['size'],
+                'mean_intensity': cluster['intensity'],
+                'inside_fraction': cluster['inside_fraction'],
+                'edge_fraction': cluster['edge_fraction'],
+            }
+            for rank, cluster in enumerate(returned, start=1)
+        ],
+    }
+    return returned, audit
 
 
 def component_sizes_and_centroids(
@@ -887,10 +960,48 @@ def main():
         type=Path,
         help="Directory for Stage-1 CSV/ROI/mask outputs (default: TIFF directory).",
     )
+    parser.add_argument(
+        "--reference-seed-k",
+        type=float,
+        help="Override the time-average reference candidate threshold coefficient.",
+    )
+    parser.add_argument(
+        "--reference-tracking-k",
+        type=float,
+        help="Override the independent per-frame reference tracking coefficient.",
+    )
+    parser.add_argument(
+        "--reference-edge-width-px",
+        type=float,
+        default=REFERENCE_EDGE_WIDTH_PX,
+        help="Inner nucleus boundary-band width used for reference candidate filtering.",
+    )
+    parser.add_argument(
+        "--reference-max-edge-fraction",
+        type=float,
+        default=REFERENCE_MAX_EDGE_FRACTION,
+        help="Maximum fraction of an intact reference component inside the boundary band.",
+    )
     args = parser.parse_args()
 
     nucleus_path = args.nucleus_path.resolve()
     reference_channel = args.reference_channel
+    reference_seed_k = (
+        args.reference_seed_k
+        if args.reference_seed_k is not None
+        else REFERENCE_SEED_K[reference_channel]
+    )
+    reference_tracking_k = (
+        args.reference_tracking_k
+        if args.reference_tracking_k is not None
+        else REFERENCE_TRACKING_K[reference_channel]
+    )
+    if reference_seed_k <= 0 or reference_tracking_k <= 0:
+        parser.error("reference k values must be positive")
+    if args.reference_edge_width_px < 0:
+        parser.error("--reference-edge-width-px must be non-negative")
+    if not 0 <= args.reference_max_edge_fraction <= 1:
+        parser.error("--reference-max-edge-fraction must be in [0, 1]")
     target_channels = tuple(channel for channel in CHANNELS if channel != reference_channel)
     reference_prefix = CHANNEL_PREFIX[reference_channel]
     if not nucleus_path.name.endswith('_Nucleus.tif'):
@@ -975,23 +1086,52 @@ def main():
     masks_path = out_dir / 'Nucleus_masks.tif'
     save_nucleus_masks_tiff(nucleus_masks, H, W, masks_path)
     print(f"  Saved : {masks_path.name}")
+    available_nucleus_masks = np.stack(
+        [mask for mask in nucleus_masks if mask is not None]
+    ).astype(bool)
+    reference_consensus_mask = (
+        available_nucleus_masks.mean(axis=0)
+        >= REFERENCE_MASK_OCCUPANCY_FRACTION
+    )
 
     # ── Signal detection on green averaged image ──────────────────────────────
     print(f"\nDetecting {reference_channel} reference signal clusters (time-averaged image)...")
     _valid = compute_valid_mask(avgs[reference_channel])
     ref_mean = float(avgs[reference_channel][_valid].mean())
     ref_std = float(avgs[reference_channel][_valid].std())
-    reference_clusters = detect_signal_clusters(
-        avgs[reference_channel], K_SIGNAL[reference_channel], MIN_SPOT_PX, N_MAX
+    reference_clusters, reference_detection_audit = detect_signal_clusters(
+        avgs[reference_channel],
+        reference_seed_k,
+        MIN_SPOT_PX,
+        N_MAX,
+        reference_consensus_mask,
+        args.reference_edge_width_px,
+        args.reference_max_edge_fraction,
     )
     print(f"  {reference_channel:<7}: {len(reference_clusters)} cluster(s)  "
-          f"threshold = {ref_mean:.1f} + {K_SIGNAL[reference_channel]}×{ref_std:.1f} = "
-          f"{ref_mean + K_SIGNAL[reference_channel]*ref_std:.1f}  "
+          f"threshold = {ref_mean:.1f} + {reference_seed_k}×{ref_std:.1f} = "
+          f"{ref_mean + reference_seed_k*ref_std:.1f}  "
           f"sizes = {[c['size'] for c in reference_clusters]}")
+    reference_detection_audit.update({
+        'reference_channel': reference_channel,
+        'reference_tracking_k': float(reference_tracking_k),
+        'mask_occupancy_fraction': REFERENCE_MASK_OCCUPANCY_FRACTION,
+        'selection_order': [
+            'global connected components on the valid time-average image',
+            'minimum component area',
+            '100 percent intact-component containment in consensus nucleus mask',
+            'inner boundary-band fraction filter',
+            'descending original component mean intensity',
+            'top-N cap',
+        ],
+    })
+    (out_dir / 'reference_detection_audit.json').write_text(
+        json.dumps(reference_detection_audit, indent=2), encoding='utf-8'
+    )
 
     if not reference_clusters:
         print(f"\nNo {reference_channel} reference signal clusters found. "
-              f"Try lowering K_SIGNAL['{reference_channel}'] or MIN_SPOT_PX.")
+              f"Try lowering reference_seed_k or MIN_SPOT_PX.")
         sys.exit(0)
 
     # ╔══════════════════════════════════════════════════════════════════════╗
@@ -1010,7 +1150,7 @@ def main():
               f"size={spot['size']} px  intensity={spot['intensity']:.1f}")
 
         indexed_pos = track_spot_indexed(
-            stacks[reference_channel], (cy, cx), K_SIGNAL[reference_channel]
+            stacks[reference_channel], (cy, cx), reference_tracking_k
         )
         print(f"    {reference_channel.capitalize()} tracked in {len(indexed_pos)}/{n_frames} frames")
         if not indexed_pos:
@@ -1092,7 +1232,7 @@ def main():
                 ifpx = _INTER_FRAME_MAX_PX_RED if ch == 'red' else _INTER_FRAME_MAX_PX
                 print(f"    ── {ch.capitalize()} tracking ──")
                 pos = track_channel_in_roi(
-                    stacks[ch], roi, reference_traj, centroid_avg, K_SIGNAL[ch],
+                    stacks[ch], roi, reference_traj, centroid_avg, TARGET_TRACKING_K[ch],
                     inter_frame_max_px=ifpx)
                 if pos:
                     csv_path = out_dir / f'{prefix}_loci{label}_traj_rela2wholeimg.csv'
@@ -1116,7 +1256,7 @@ def main():
                 print(f"    ── {ch.capitalize()} tracking (joint) ──")
 
                 seed_trajs, seed_ks = find_seed_trajectories_in_mask(
-                    stacks[ch], union_mask, SEED_MAX_FRAME, K_SIGNAL[ch],
+                    stacks[ch], union_mask, SEED_MAX_FRAME, TARGET_TRACKING_K[ch],
                     inter_frame_max_px=ifpx)
                 print(f"    Seed trajectories found in union ROI: {len(seed_trajs)}")
 

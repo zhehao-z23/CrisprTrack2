@@ -1,5 +1,27 @@
 # Changelog
 
+## 5.0.0-dev1-trackmem-global-gap — 2026-07-29
+
+- Fork the clean v4.2.2 worktree into a separate v5 development snapshot;
+  retain the complete v4.2.2 source unchanged.
+- Change the `spt_track.m` global-gap boundary from “split at every missing
+  frame” to “split only when globally missing frames exceed `trackMem`”.
+- Preserve v4 behavior exactly when `trackMem=0`.
+- Keep the existing fixed `max_disp`; this release does not implement
+  timestamp-aware or gap-scaled search radii.
+- Add MATLAB runtime regressions for one- and two-frame global gaps, exact
+  memory boundaries, and two-particle identity preservation.
+- Add dependency-free Python source-contract tests and a one-command local
+  test runner.
+- Stamp all three trajectory runtime manifests with the v5 dev1 version while
+  retaining the existing runner filenames and output layout for compatibility.
+- Add a temporary-TIFF integration test that exercises first-frame threshold
+  calculation, particle detection, a globally empty frame and final linking.
+- Add a local same-TIFF v4.2/v5 control: v4.2 remains fragmented while v5
+  recovers the expected trajectory under the unchanged production parameters.
+- Add a non-destructive Sherlock deployment overlay, checksum workflow and
+  synthetic preflight runner before any real-data smoke test.
+
 ## 4.2.2-convex-hull-roi — 2026-07-25
 
 - Add an explicit `tube` versus `convex_hull` static anchor-ROI option.

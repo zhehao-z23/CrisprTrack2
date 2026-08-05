@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run v4.1 profile-locked anchor-ROI SPT for every valid cell crop in one FOV."""
+"""Run the v5 profile-locked anchor-ROI SPT for every valid cell crop in one FOV."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v4.2.2-convex-hull-roi"
+VERSION = "v5.0.0-dev1-trackmem-global-gap"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 

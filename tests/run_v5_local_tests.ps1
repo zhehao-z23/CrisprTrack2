@@ -1,5 +1,5 @@
 param(
-    [string]$Python = "D:\MSYS2\ucrt64\bin\python.exe",
+    [string]$Python = "python",
     [string]$Matlab = "D:\Program Files\MATLAB\R2025b\bin\matlab.exe"
 )
 
@@ -7,8 +7,9 @@ $ErrorActionPreference = "Stop"
 $TestRoot = $PSScriptRoot
 $RepoRoot = Split-Path -Parent $TestRoot
 
-if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
-    throw "Python executable not found: $Python"
+$PythonCommand = Get-Command $Python -ErrorAction SilentlyContinue
+if ($null -eq $PythonCommand) {
+    throw "Python executable not found on PATH or at the supplied path: $Python"
 }
 if (-not (Test-Path -LiteralPath $Matlab -PathType Leaf)) {
     throw "MATLAB executable not found: $Matlab"
@@ -16,10 +17,10 @@ if (-not (Test-Path -LiteralPath $Matlab -PathType Leaf)) {
 
 Push-Location $RepoRoot
 try {
-    & $Python -m unittest `
-        discover -s tests -p "test_*contract.py" -v
+    & $PythonCommand.Source -m unittest `
+        discover -s tests -p "test_*.py" -v
     if ($LASTEXITCODE -ne 0) {
-        throw "Python source-contract tests failed with exit code $LASTEXITCODE"
+        throw "Python tests failed with exit code $LASTEXITCODE"
     }
 
     & $Matlab -batch (

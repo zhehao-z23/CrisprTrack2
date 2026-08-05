@@ -1,5 +1,27 @@
 # Changelog
 
+## 5.1.0 — 2026-08-05
+
+- Set drift-aligned micro-SAM mask expansion to 0 px by default; keep the
+  independent 5 px anchor-ROI dilation required by Gaussian fit support.
+- Lock `D*=0.0041`, `alpha=0.38` and solve one movie-level radius whose product
+  of adjacent-step inclusion probabilities is 0.975; prefer exact crop-sidecar
+  ND2 intervals, audit a uniform TIFF fallback, and round upward to 0.05 px.
+- Retain the same scalar radius after every v5-permitted gap; do not fit D per
+  cell/ND2 and do not add a gap-scaled linker.
+- Select reference seeds from global time-average connected components using
+  minimum area, 100% consensus-mask containment, a 3 px inner edge band with
+  at most 10% occupancy, original mean-intensity ranking and a Top-5 cap.
+- Split DSB Purple reference thresholds into `k_seed=1.645` and
+  `k_tracking=0.5`; record every component decision and accepted trajectory
+  length in `reference_detection_audit.json`.
+- Add one versioned coordinate module for automatic 1-based pixel centres,
+  ThunderSTORM 0.5-based ROI-local centres, FIJI ROI edges and 1-based frames;
+  update QC overlays and cellular feature extraction to use it.
+- Add synthetic regression tests for reference policy, trajectory-level
+  max-disp probability, exact sidecar timing, coordinate transforms and runner
+  defaults, plus a complete Chinese analysis/provenance contract.
+
 ## 5.0.0-dev1-trackmem-global-gap — 2026-07-29
 
 - Fork the clean v4.2.2 worktree into a separate v5 development snapshot;

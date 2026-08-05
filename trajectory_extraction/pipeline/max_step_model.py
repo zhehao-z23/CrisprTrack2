@@ -1,24 +1,55 @@
 #!/usr/bin/env python3
-"""Metadata-to-physics model for the v4 trajectory-linking step radius."""
+"""Derive one reproducible SPT displacement gate from movie metadata.
+
+The production rule locks the motion prior globally and calibrates a single
+radius for the complete acquisition.  It does not estimate D* per cell and it
+does not enlarge the radius after a gap.
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
+import statistics
 from pathlib import Path
 
 import tifffile
 
 
-MODEL_VERSION = "v4.0.0-anchor-roi"
+MODEL_VERSION = "v5.1.0-trajectory-coverage"
+DEFAULT_D_STAR = 4.1e-3
+DEFAULT_ANOMALOUS_EXPONENT = 0.38
+DEFAULT_TRAJECTORY_COVERAGE = 0.975
+DEFAULT_LOCALIZATION_ERROR_NM = 0.0
+DEFAULT_ROUNDING_INCREMENT_PX = 0.05
 
 
 def _resolution_value(value) -> float:
     if isinstance(value, tuple) and len(value) == 2:
         return float(value[0]) / float(value[1])
     return float(value)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def normalize_spatial_unit(unit: object) -> str:
+    """Normalize explicit micron spellings without depending on console encoding."""
+    value = re.sub(
+        r"\\u(?:00b5|03bc)", "u", str(unit), flags=re.IGNORECASE
+    ).lower()
+    value = value.replace("\u00b5", "u").replace("\u03bc", "u")
+    if value not in {"micron", "microns", "um"}:
+        raise ValueError(f"TIFF spatial unit must explicitly be microns; found {unit!r}")
+    return "um"
 
 
 def read_tracking_metadata(tiff_path: Path) -> dict:
@@ -55,13 +86,11 @@ def read_tracking_metadata(tiff_path: Path) -> dict:
                 f"found x={pixel_size_x_um} and y={pixel_size_y_um} um/px"
             )
 
-        unit = str(imagej.get("unit", ""))
-        unit = re.sub(r"\\u(?:00b5|03bc)", "u", unit, flags=re.IGNORECASE)
-        if unit.lower() not in {"micron", "microns", "um", "µm", "μm"}:
-            raise ValueError(
-                "TIFF spatial unit must explicitly be microns; "
-                f"found {unit!r} in {tiff_path}"
-            )
+        raw_unit = imagej.get("unit", "")
+        try:
+            unit = normalize_spatial_unit(raw_unit)
+        except ValueError as error:
+            raise ValueError(f"{error} in {tiff_path}") from error
 
         series = tif.series[0]
         axes = series.axes
@@ -115,51 +144,145 @@ def validate_channel_metadata(channel_tiffs: dict[str, Path]) -> dict[str, dict]
     return metadata
 
 
-def calculate_max_displacement(
-    *,
-    pixel_size_um: float,
-    frame_interval_s: float,
-    frame_gap: int,
+def _validated_intervals(values: object, expected_count: int, source: str) -> list[float]:
+    if not isinstance(values, list) or len(values) != expected_count:
+        raise ValueError(
+            f"{source} must contain exactly {expected_count} adjacent-frame intervals"
+        )
+    intervals = [float(value) for value in values]
+    if any(not math.isfinite(value) or value <= 0 for value in intervals):
+        raise ValueError(f"{source} contains a non-positive or non-finite interval")
+    return intervals
+
+
+def read_movie_intervals(
+    metadata: dict,
+    crop_metadata_sidecar: Path | None = None,
+) -> tuple[list[float], dict]:
+    """Prefer exact ND2 intervals in the crop sidecar; audit any uniform fallback."""
+    frame_count = int(metadata["frame_count"])
+    expected = frame_count - 1
+    if expected < 1:
+        raise ValueError("At least two movie frames are required to derive max_disp")
+
+    if crop_metadata_sidecar is not None:
+        path = Path(crop_metadata_sidecar).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Crop metadata sidecar not found: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        time_metadata = payload.get("time", {})
+        raw_intervals = time_metadata.get("frame_intervals_s")
+        method = "time.frame_intervals_s"
+        if not raw_intervals:
+            times = time_metadata.get("relative_time_s")
+            if times is not None:
+                if not isinstance(times, list) or len(times) != frame_count:
+                    raise ValueError(
+                        f"{path}:time.relative_time_s must contain {frame_count} timestamps"
+                    )
+                times = [float(value) for value in times]
+                raw_intervals = [right - left for left, right in zip(times[:-1], times[1:])]
+                method = "diff(time.relative_time_s)"
+        if raw_intervals:
+            intervals = _validated_intervals(raw_intervals, expected, f"{path}:{method}")
+        else:
+            representative = float(
+                time_metadata.get("finterval_s") or metadata["frame_interval_s"]
+            )
+            if not math.isfinite(representative) or representative <= 0:
+                raise ValueError(f"No valid timing interval is available in {path}")
+            intervals = [representative] * expected
+            return intervals, {
+                "source": "uniform_sidecar_finterval_fallback",
+                "method": "repeat sidecar/TIFF finterval for frame_count - 1 steps",
+                "path": str(path),
+                "sha256": _sha256(path),
+                "source_nd2": payload.get("source_nd2"),
+                "fallback_used": True,
+                "warning": (
+                    "The crop sidecar has no exact frame intervals/timestamps. "
+                    "A representative interval was repeated explicitly."
+                ),
+            }
+        return intervals, {
+            "source": "exact_crop_sidecar",
+            "method": method,
+            "path": str(path),
+            "sha256": _sha256(path),
+            "source_nd2": payload.get("source_nd2"),
+            "fallback_used": False,
+        }
+
+    representative = float(metadata["frame_interval_s"])
+    intervals = [representative] * expected
+    return intervals, {
+        "source": "uniform_tiff_finterval_fallback",
+        "method": "repeat TIFF finterval for frame_count - 1 steps",
+        "path": None,
+        "sha256": None,
+        "source_nd2": None,
+        "fallback_used": True,
+        "warning": (
+            "Exact crop sidecar was unavailable. The run remains reproducible, "
+            "but it does not use per-frame ND2 timing jitter."
+        ),
+    }
+
+
+def _variance_terms(
+    frame_intervals_s: list[float],
     diffusion_coefficient_um2_per_s_alpha: float,
     anomalous_exponent: float,
-    coverage_probability: float,
     localization_error_um: float,
-) -> dict:
-    """Calculate a Rayleigh radial quantile for 2-D anomalous diffusion."""
-    if pixel_size_um <= 0 or frame_interval_s <= 0:
-        raise ValueError("pixel size and frame interval must be positive")
-    if frame_gap < 1:
-        raise ValueError("frame_gap must be at least 1")
+) -> list[float]:
     if diffusion_coefficient_um2_per_s_alpha < 0 or localization_error_um < 0:
         raise ValueError("diffusion coefficient and localization error cannot be negative")
     if not 0 < anomalous_exponent <= 2:
         raise ValueError("anomalous_exponent must be in (0, 2]")
-    if not 0 < coverage_probability < 1:
-        raise ValueError("coverage_probability must be in (0, 1)")
+    if not frame_intervals_s:
+        raise ValueError("At least one adjacent-frame interval is required")
+    terms = [
+        diffusion_coefficient_um2_per_s_alpha * interval**anomalous_exponent
+        + localization_error_um**2
+        for interval in frame_intervals_s
+    ]
+    if any(term <= 0 for term in terms):
+        raise ValueError("At least one modeled motion/localization variance term must be positive")
+    return terms
 
-    lag_time_s = frame_gap * frame_interval_s
-    diffusion_term_um2 = (
-        diffusion_coefficient_um2_per_s_alpha * lag_time_s**anomalous_exponent
-    )
-    localization_term_um2 = localization_error_um**2
-    radial_variance_term_um2 = diffusion_term_um2 + localization_term_um2
-    if radial_variance_term_um2 <= 0:
-        raise ValueError(
-            "At least one modeled motion/localization variance term must be positive"
-        )
-    radius_um = math.sqrt(
-        -4.0 * math.log(1.0 - coverage_probability) * radial_variance_term_um2
-    )
-    return {
-        "frame_gap": frame_gap,
-        "lag_time_s": lag_time_s,
-        "diffusion_term_um2": diffusion_term_um2,
-        "localization_term_um2": localization_term_um2,
-        "radial_variance_term_um2": radial_variance_term_um2,
-        "theoretical_radius_um": radius_um,
-        "theoretical_radius_nm": radius_um * 1000.0,
-        "theoretical_radius_px": radius_um / pixel_size_um,
-    }
+
+def step_coverages(radius_um: float, variance_terms_um2: list[float]) -> list[float]:
+    if radius_um < 0:
+        raise ValueError("radius cannot be negative")
+    return [
+        -math.expm1(-(radius_um**2) / (4.0 * variance))
+        for variance in variance_terms_um2
+    ]
+
+
+def whole_trajectory_coverage(radius_um: float, variance_terms_um2: list[float]) -> float:
+    coverages = step_coverages(radius_um, variance_terms_um2)
+    if any(value <= 0 for value in coverages):
+        return 0.0
+    return math.exp(sum(math.log(value) for value in coverages))
+
+
+def solve_trajectory_radius(
+    variance_terms_um2: list[float], target_coverage: float
+) -> float:
+    if not 0 < target_coverage < 1:
+        raise ValueError("trajectory_coverage_probability must be in (0, 1)")
+    lower = 0.0
+    upper = math.sqrt(max(variance_terms_um2))
+    while whole_trajectory_coverage(upper, variance_terms_um2) < target_coverage:
+        upper *= 2.0
+    for _ in range(100):
+        middle = (lower + upper) / 2.0
+        if whole_trajectory_coverage(middle, variance_terms_um2) < target_coverage:
+            lower = middle
+        else:
+            upper = middle
+    return upper
 
 
 def ceil_to_increment(value: float, increment: float) -> float:
@@ -171,28 +294,39 @@ def ceil_to_increment(value: float, increment: float) -> float:
 def derive_from_metadata(
     metadata: dict,
     *,
-    diffusion_coefficient_um2_per_s_alpha: float = 4.1e-3,
-    anomalous_exponent: float = 0.38,
-    coverage_probability: float = 0.995,
-    localization_error_nm: float = 0.0,
-    frame_gap: int = 1,
-    rounding_increment_px: float = 0.05,
+    diffusion_coefficient_um2_per_s_alpha: float = DEFAULT_D_STAR,
+    anomalous_exponent: float = DEFAULT_ANOMALOUS_EXPONENT,
+    trajectory_coverage_probability: float = DEFAULT_TRAJECTORY_COVERAGE,
+    localization_error_nm: float = DEFAULT_LOCALIZATION_ERROR_NM,
+    rounding_increment_px: float = DEFAULT_ROUNDING_INCREMENT_PX,
     track_mem: int = 3,
     explicit_max_step_px: float | None = None,
+    frame_intervals_s: list[float] | None = None,
+    timing_provenance: dict | None = None,
 ) -> dict:
-    """Combine TIFF metadata and declared priors into an operational max step."""
-    theoretical = calculate_max_displacement(
-        pixel_size_um=metadata["pixel_size_x_um_per_px"],
-        frame_interval_s=metadata["frame_interval_s"],
-        frame_gap=frame_gap,
-        diffusion_coefficient_um2_per_s_alpha=diffusion_coefficient_um2_per_s_alpha,
-        anomalous_exponent=anomalous_exponent,
-        coverage_probability=coverage_probability,
-        localization_error_um=localization_error_nm / 1000.0,
+    """Combine movie timing and locked priors into one operational max_disp."""
+    pixel_size_um = float(metadata["pixel_size_x_um_per_px"])
+    if pixel_size_um <= 0:
+        raise ValueError("pixel size must be positive")
+    if frame_intervals_s is None:
+        frame_count = int(metadata.get("frame_count", 2))
+        frame_intervals_s = [float(metadata["frame_interval_s"])] * (frame_count - 1)
+        timing_provenance = timing_provenance or {
+            "source": "uniform_metadata_fallback",
+            "fallback_used": True,
+        }
+    frame_intervals_s = [float(value) for value in frame_intervals_s]
+    variance_terms = _variance_terms(
+        frame_intervals_s,
+        diffusion_coefficient_um2_per_s_alpha,
+        anomalous_exponent,
+        localization_error_nm / 1000.0,
     )
-    modeled_px = ceil_to_increment(
-        theoretical["theoretical_radius_px"], rounding_increment_px
+    theoretical_radius_um = solve_trajectory_radius(
+        variance_terms, trajectory_coverage_probability
     )
+    theoretical_radius_px = theoretical_radius_um / pixel_size_um
+    modeled_px = ceil_to_increment(theoretical_radius_px, rounding_increment_px)
     if explicit_max_step_px is not None:
         if explicit_max_step_px <= 0:
             raise ValueError("explicit_max_step_px must be positive")
@@ -200,35 +334,50 @@ def derive_from_metadata(
         operational_source = "explicit CLI override"
     else:
         operational_px = modeled_px
-        operational_source = "metadata + physical prior + upward rounding"
+        operational_source = "locked prior + movie timing + trajectory coverage + upward rounding"
 
-    operational_um = operational_px * metadata["pixel_size_x_um_per_px"]
-    variance_term = theoretical["radial_variance_term_um2"]
-    achieved_coverage = 1.0 - math.exp(-(operational_um**2) / (4.0 * variance_term))
-    gap_sensitivity = [
-        calculate_max_displacement(
-            pixel_size_um=metadata["pixel_size_x_um_per_px"],
-            frame_interval_s=metadata["frame_interval_s"],
-            frame_gap=gap,
-            diffusion_coefficient_um2_per_s_alpha=diffusion_coefficient_um2_per_s_alpha,
-            anomalous_exponent=anomalous_exponent,
-            coverage_probability=coverage_probability,
-            localization_error_um=localization_error_nm / 1000.0,
-        )
-        for gap in range(1, track_mem + 2)
-    ]
+    operational_um = operational_px * pixel_size_um
+    operational_step_coverages = step_coverages(operational_um, variance_terms)
+    achieved_trajectory_coverage = whole_trajectory_coverage(
+        operational_um, variance_terms
+    )
+    n_steps = len(frame_intervals_s)
+    equivalent_step_target = trajectory_coverage_probability ** (1.0 / n_steps)
     return {
         "version": MODEL_VERSION,
-        "formula": "r_p(tau)=sqrt(-4*ln(1-p)*(D_star*tau^alpha+sigma_loc^2)); max_step_px=r_p/pixel_size_um",
+        "formula": (
+            "p_i(r)=1-exp[-r^2/(4*(D_star*dt_i^alpha+sigma_loc^2))]; "
+            "Q(r)=product_i p_i(r); solve Q(r)=Q_target; "
+            "max_step_px=ceil_increment(r/pixel_size_um)"
+        ),
         "metadata": metadata,
+        "timing": {
+            "provenance": timing_provenance or {},
+            "adjacent_interval_count": n_steps,
+            "frame_intervals_s": frame_intervals_s,
+            "minimum_interval_s": min(frame_intervals_s),
+            "median_interval_s": statistics.median(frame_intervals_s),
+            "mean_interval_s": sum(frame_intervals_s) / n_steps,
+            "maximum_interval_s": max(frame_intervals_s),
+        },
         "physical_prior": {
             "diffusion_coefficient_D_star_um2_per_s_alpha": diffusion_coefficient_um2_per_s_alpha,
             "anomalous_exponent_alpha": anomalous_exponent,
-            "radial_coverage_probability_p": coverage_probability,
             "localization_error_per_frame_per_axis_nm": localization_error_nm,
+            "D_star_policy": "locked global prior; no per-cell or per-ND2 refit",
         },
-        "applied_lag": {"frame_gap": frame_gap, "lag_time_s": theoretical["lag_time_s"]},
-        "calculation": theoretical,
+        "coverage_policy": {
+            "scope": "complete acquisition adjacent-frame transitions",
+            "target_whole_trajectory_no_exceedance_probability": trajectory_coverage_probability,
+            "one_sided_at_least_one_exceedance_probability": 1.0 - trajectory_coverage_probability,
+            "equivalent_uniform_per_step_coverage": equivalent_step_target,
+            "independence_assumption": True,
+        },
+        "calculation": {
+            "theoretical_radius_um": theoretical_radius_um,
+            "theoretical_radius_nm": theoretical_radius_um * 1000.0,
+            "theoretical_radius_px": theoretical_radius_px,
+        },
         "rounding_policy": {"mode": "ceiling", "increment_px": rounding_increment_px},
         "modeled_max_step_px": modeled_px,
         "explicit_max_step_px": explicit_max_step_px,
@@ -236,29 +385,52 @@ def derive_from_metadata(
         "operational_max_step_px": operational_px,
         "operational_max_step_um": operational_um,
         "operational_max_step_nm": operational_um * 1000.0,
-        "achieved_adjacent_frame_radial_coverage": achieved_coverage,
+        "achieved_trajectory_coverage": achieved_trajectory_coverage,
+        "achieved_step_coverage": {
+            "minimum": min(operational_step_coverages),
+            "mean": sum(operational_step_coverages) / n_steps,
+            "maximum": max(operational_step_coverages),
+            "expected_exceeding_steps_per_trajectory": sum(
+                1.0 - value for value in operational_step_coverages
+            ),
+        },
         "tracker_implementation": {
             "track_mem": track_mem,
             "maximum_detection_frame_gap": track_mem + 1,
             "gap_scaled_radius_implemented": False,
-            "warning": "the same scalar radius is used after gaps; sensitivity values are audit-only",
+            "rule": "the same movie-level scalar max_disp is used after every permitted gap",
         },
-        "gap_sensitivity_not_applied": gap_sensitivity,
     }
 
 
-def derive_from_tiff(tiff_path: Path, **kwargs) -> dict:
-    return derive_from_metadata(read_tracking_metadata(tiff_path), **kwargs)
+def derive_from_tiff(
+    tiff_path: Path,
+    *,
+    crop_metadata_sidecar: Path | None = None,
+    **kwargs,
+) -> dict:
+    metadata = read_tracking_metadata(tiff_path)
+    intervals, provenance = read_movie_intervals(metadata, crop_metadata_sidecar)
+    return derive_from_metadata(
+        metadata,
+        frame_intervals_s=intervals,
+        timing_provenance=provenance,
+        **kwargs,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tiff", type=Path)
-    parser.add_argument("--d-star", type=float, default=4.1e-3)
-    parser.add_argument("--alpha", type=float, default=0.38)
-    parser.add_argument("--coverage", type=float, default=0.995)
+    parser.add_argument("--crop-metadata-sidecar", type=Path)
+    parser.add_argument("--d-star", type=float, default=DEFAULT_D_STAR)
+    parser.add_argument("--alpha", type=float, default=DEFAULT_ANOMALOUS_EXPONENT)
+    parser.add_argument(
+        "--trajectory-coverage",
+        type=float,
+        default=DEFAULT_TRAJECTORY_COVERAGE,
+    )
     parser.add_argument("--localization-error-nm", type=float, default=0.0)
-    parser.add_argument("--frame-gap", type=int, default=1)
     parser.add_argument("--rounding-increment-px", type=float, default=0.05)
     parser.add_argument("--track-mem", type=int, default=3)
     parser.add_argument("--max-step-px", type=float)
@@ -266,11 +438,11 @@ def main() -> None:
     args = parser.parse_args()
     result = derive_from_tiff(
         args.tiff,
+        crop_metadata_sidecar=args.crop_metadata_sidecar,
         diffusion_coefficient_um2_per_s_alpha=args.d_star,
         anomalous_exponent=args.alpha,
-        coverage_probability=args.coverage,
+        trajectory_coverage_probability=args.trajectory_coverage,
         localization_error_nm=args.localization_error_nm,
-        frame_gap=args.frame_gap,
         rounding_increment_px=args.rounding_increment_px,
         track_mem=args.track_mem,
         explicit_max_step_px=args.max_step_px,

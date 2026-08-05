@@ -27,7 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v5.0.0-dev1-trackmem-global-gap"
+VERSION = "v5.1.0"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"
@@ -81,6 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input_path", type=Path, help="Step-3 crop TIFF, or Fiji analysis directory with --no-fiji.")
     parser.add_argument("--no-fiji", action="store_true", help="Reuse an existing Fiji analysis directory.")
     parser.add_argument("--crop-tif", type=Path, help="Original crop TIFF for --no-fiji if it cannot be inferred as <analysis_dir>.tif.")
+    parser.add_argument("--crop-metadata-sidecar", type=Path, help="Override the standard <crop>_metadata.json timing sidecar.")
     parser.add_argument("--microsam-mask", type=Path, help="Override the crop-associated micro-SAM mask.")
     parser.add_argument("--fiji-bin", default="fiji")
     parser.add_argument("--matlab-bin", default="matlab")
@@ -92,7 +93,16 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Required locked biological channel contract; it determines the anchor automatically.",
     )
-    parser.add_argument("--mask-dilation-px", type=int, default=5)
+    parser.add_argument(
+        "--mask-dilation-px",
+        type=int,
+        default=0,
+        help="Drift-aligned micro-SAM support expansion. Final v5.1 default is 0 px.",
+    )
+    parser.add_argument("--reference-seed-k", type=float)
+    parser.add_argument("--reference-tracking-k", type=float)
+    parser.add_argument("--reference-edge-width-px", type=float, default=3.0)
+    parser.add_argument("--reference-max-edge-fraction", type=float, default=0.10)
     parser.add_argument(
         "--roi-geometry",
         choices=("tube", "convex_hull"),
@@ -105,9 +115,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)
-    parser.add_argument("--coverage-probability", type=float, default=0.995)
+    parser.add_argument("--trajectory-coverage-probability", type=float, default=0.975)
     parser.add_argument("--localization-error-nm", type=float, default=0.0)
-    parser.add_argument("--max-step-frame-gap", type=int, default=1)
     parser.add_argument("--max-step-rounding-px", type=float, default=0.05)
     parser.add_argument("--max-step-px", type=float, help="Explicit override; default is metadata + physical-prior model.")
     return parser.parse_args()
@@ -136,6 +145,12 @@ def main() -> None:
     args = parse_args()
     started = datetime.now()
     crop_tiff, analysis_dir, run_fiji_now = resolve_inputs(args)
+    standard_sidecar = crop_tiff.with_name(crop_tiff.stem + "_metadata.json")
+    crop_metadata_sidecar = (
+        args.crop_metadata_sidecar.resolve()
+        if args.crop_metadata_sidecar
+        else (standard_sidecar.resolve() if standard_sidecar.is_file() else None)
+    )
     profile = experiment_profiles.get_profile(args.experiment_profile)
     profile_validation = profile.validate_crop(crop_tiff)
     anchor_channel = profile.anchor_channel
@@ -165,6 +180,7 @@ def main() -> None:
         "status": "running",
         "started_at": started.isoformat(timespec="seconds"),
         "crop_tiff": str(crop_tiff),
+        "crop_metadata_sidecar": str(crop_metadata_sidecar) if crop_metadata_sidecar else None,
         "analysis_dir": str(analysis_dir),
         "results_dir": str(results_dir),
         "experiment_profile": profile.name,
@@ -211,7 +227,7 @@ def main() -> None:
             aligned_mask = Path(alignment["aligned_dilated_mask"])
 
             anchor_dir = results_dir / "anchor_stage1"
-            run([
+            stage1_command = [
                 sys.executable,
                 str(STAGE1),
                 str(nucleus_tiff),
@@ -221,7 +237,16 @@ def main() -> None:
                 str(aligned_mask),
                 "--output-dir",
                 str(anchor_dir),
-            ])
+                "--reference-edge-width-px",
+                str(args.reference_edge_width_px),
+                "--reference-max-edge-fraction",
+                str(args.reference_max_edge_fraction),
+            ]
+            if args.reference_seed_k is not None:
+                stage1_command.extend(["--reference-seed-k", str(args.reference_seed_k)])
+            if args.reference_tracking_k is not None:
+                stage1_command.extend(["--reference-tracking-k", str(args.reference_tracking_k)])
+            run(stage1_command)
 
             spt_command = [
                 sys.executable,
@@ -247,15 +272,15 @@ def main() -> None:
                 str(args.d_star),
                 "--alpha",
                 str(args.alpha),
-                "--coverage-probability",
-                str(args.coverage_probability),
+                "--trajectory-coverage-probability",
+                str(args.trajectory_coverage_probability),
                 "--localization-error-nm",
                 str(args.localization_error_nm),
-                "--max-step-frame-gap",
-                str(args.max_step_frame_gap),
                 "--max-step-rounding-px",
                 str(args.max_step_rounding_px),
             ]
+            if crop_metadata_sidecar is not None:
+                spt_command.extend(["--crop-metadata-sidecar", str(crop_metadata_sidecar)])
             if args.matlab_save_filter_images:
                 spt_command.append("--matlab-save-filter-images")
             if args.max_step_px is not None:

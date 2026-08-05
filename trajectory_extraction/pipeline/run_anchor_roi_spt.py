@@ -24,6 +24,7 @@ from skimage.morphology import convex_hull_image
 
 import max_step_model
 import experiment_profiles
+import coordinate_system
 
 
 for _stream in (sys.stdout, sys.stderr):
@@ -31,7 +32,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v5.0.0-dev1-trackmem-global-gap"
+VERSION = "v5.1.0"
 HERE = Path(__file__).resolve().parent
 MATLAB_DEPS = HERE / "matlab_deps"
 CHANNELS = ("green", "red", "purple")
@@ -76,8 +77,8 @@ def read_track_px(path: Path, pixel_size_nm: float) -> list[tuple[int, float, fl
             points.append(
                 (
                     int(float(row["frame"])),
-                    float(row["x_nm"]) / pixel_size_nm - 1.0,
-                    float(row["y_nm"]) / pixel_size_nm - 1.0,
+                    float(coordinate_system.automatic_nm_to_image_px(row["x_nm"], pixel_size_nm)),
+                    float(coordinate_system.automatic_nm_to_image_px(row["y_nm"], pixel_size_nm)),
                 )
             )
     return sorted(points)
@@ -296,7 +297,9 @@ def export_candidates(tiffs: dict[str, Path], matlab_dir: Path) -> list[Path]:
                 writer = csv.writer(handle)
                 writer.writerow(["frame", "x_nm", "y_nm"])
                 for x, y, frame in positions[:, :3]:
-                    writer.writerow([int(frame), f"{x * pixel_nm:.2f}", f"{y * pixel_nm:.2f}"])
+                    x_nm = coordinate_system.matlab_one_based_px_to_automatic_nm(x, pixel_nm)
+                    y_nm = coordinate_system.matlab_one_based_px_to_automatic_nm(y, pixel_nm)
+                    writer.writerow([int(frame), f"{float(x_nm):.2f}", f"{float(y_nm):.2f}"])
             outputs.append(path)
     return outputs
 
@@ -314,7 +317,10 @@ def candidate_audit(
     points = read_candidate_nm(path)
     frames = np.asarray([point[0] for point in points], dtype=int)
     xy_nm = np.asarray([[point[1], point[2]] for point in points], dtype=float)
-    xy_px = xy_nm / pixel_size_nm - 1.0
+    x_px, y_px = coordinate_system.automatic_nm_to_image_xy(
+        xy_nm[:, 0], xy_nm[:, 1], pixel_size_nm
+    )
+    xy_px = np.column_stack([x_px, y_px])
     frame_diffs = np.diff(frames)
     step_px = np.linalg.norm(np.diff(xy_px, axis=0), axis=1) if len(points) > 1 else np.array([])
     inside = []
@@ -458,11 +464,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--matlab-bin", default="matlab")
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--matlab-save-filter-images", action="store_true")
+    parser.add_argument(
+        "--crop-metadata-sidecar",
+        type=Path,
+        help="Crop _metadata.json containing exact ND2 frame intervals; uniform TIFF timing is the audited fallback.",
+    )
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)
-    parser.add_argument("--coverage-probability", type=float, default=0.995)
+    parser.add_argument("--trajectory-coverage-probability", type=float, default=0.975)
     parser.add_argument("--localization-error-nm", type=float, default=0.0)
-    parser.add_argument("--max-step-frame-gap", type=int, default=1)
     parser.add_argument("--max-step-rounding-px", type=float, default=0.05)
     parser.add_argument("--max-step-px", type=float, help="Explicit override; otherwise use the metadata/physical model.")
     return parser.parse_args()
@@ -493,16 +503,21 @@ def main() -> None:
     tiffs = locate_channel_tiffs(analysis_dir)
     metadata_by_channel = max_step_model.validate_channel_metadata(tiffs)
     metadata = metadata_by_channel["green"]
+    frame_intervals_s, timing_provenance = max_step_model.read_movie_intervals(
+        metadata,
+        args.crop_metadata_sidecar,
+    )
     derivation = max_step_model.derive_from_metadata(
         metadata,
         diffusion_coefficient_um2_per_s_alpha=args.d_star,
         anomalous_exponent=args.alpha,
-        coverage_probability=args.coverage_probability,
+        trajectory_coverage_probability=args.trajectory_coverage_probability,
         localization_error_nm=args.localization_error_nm,
-        frame_gap=args.max_step_frame_gap,
         rounding_increment_px=args.max_step_rounding_px,
         track_mem=3,
         explicit_max_step_px=args.max_step_px,
+        frame_intervals_s=frame_intervals_s,
+        timing_provenance=timing_provenance,
     )
     derivation["metadata_consistency_across_channel_tiffs"] = {
         "verified": True,
@@ -574,7 +589,7 @@ def main() -> None:
                 "roi_geometry": args.roi_geometry,
                 "roi_dilation_px": args.roi_dilation_px,
                 "gaussian_fit_box_size_px": GAUSSIAN_FIT_BOX_SIZE_PX,
-                "nucleus_support": "frame 1 of drift-aligned dilated micro-SAM mask",
+                "nucleus_support": "frame 1 of drift-aligned micro-SAM mask (mask dilation is independently audited)",
                 "roi_area_px": int(roi.sum()),
                 "connected_components": components,
                 "bbox_top": int(rows.min()),
@@ -657,6 +672,7 @@ def main() -> None:
         "selected_baseline_count": len(selected_rows),
         "max_step_model_audit": str((audit_dir / "max_step_model.json").resolve()),
         "operational_max_step_px": max_step_px,
+        "coordinate_contract": coordinate_system.contract_manifest(),
         "outputs": {
             "roi_geometry": str((audit_dir / "static_anchor_roi_geometry.csv").resolve()),
             "all_candidates": str((audit_dir / "all_candidate_trajectories.csv").resolve()),

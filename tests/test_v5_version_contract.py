@@ -16,7 +16,7 @@ RUNNERS = (
 class V5VersionContractTests(unittest.TestCase):
     def test_runtime_manifests_use_repository_version(self) -> None:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "5.0.0-dev1-trackmem-global-gap")
+        self.assertEqual(version, "5.1.0")
         expected = f'VERSION = "v{version}"'
         for runner in RUNNERS:
             with self.subTest(runner=runner.relative_to(ROOT)):

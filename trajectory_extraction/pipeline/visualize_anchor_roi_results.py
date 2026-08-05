@@ -18,6 +18,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 import max_step_model
 import experiment_profiles
+import coordinate_system
 from run_anchor_roi_spt import PREFIX, locate_channel_tiffs, read_candidate_nm, read_track_px
 
 
@@ -130,8 +131,11 @@ def spatial_overview(
             prefix = baseline["channel"]
             points = read_candidate_nm(Path(baseline["baseline_csv"]))
             frames = np.asarray([point[0] for point in points])
-            x = np.asarray([point[1] for point in points]) / pixel_size_nm - 1.0
-            y = np.asarray([point[2] for point in points]) / pixel_size_nm - 1.0
+            x, y = coordinate_system.automatic_nm_to_image_xy(
+                [point[1] for point in points],
+                [point[2] for point in points],
+                pixel_size_nm,
+            )
             plot_gradient_line(
                 right, x, y, frames,
                 cmap=time_cmap(prefix, channel_colors), linewidth=1.8
@@ -162,8 +166,11 @@ def all_candidates_figure(
         for row in rows:
             points = read_candidate_nm(Path(row["candidate_csv"]))
             frames = np.asarray([point[0] for point in points])
-            x = np.asarray([point[1] for point in points]) / pixel_size_nm - 1.0
-            y = np.asarray([point[2] for point in points]) / pixel_size_nm - 1.0
+            x, y = coordinate_system.automatic_nm_to_image_xy(
+                [point[1] for point in points],
+                [point[2] for point in points],
+                pixel_size_nm,
+            )
             selected = Path(row["candidate_csv"]).resolve() in selected_paths
             plot_gradient_line(
                 axis,
@@ -258,7 +265,7 @@ def main() -> None:
         )
         if len(mask_matches) != 1:
             raise FileNotFoundError(
-                "Expected one aligned dilated micro-SAM mask under results/mask_alignment; "
+                "Expected one drift-aligned micro-SAM mask under results/mask_alignment; "
                 "pass --aligned-microsam-mask explicitly."
             )
         aligned_mask_path = mask_matches[0]

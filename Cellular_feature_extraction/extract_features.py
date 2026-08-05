@@ -30,6 +30,12 @@ import argparse
 import csv
 from pathlib import Path
 
+PIPELINE_DIR = Path(__file__).resolve().parents[1] / 'trajectory_extraction' / 'pipeline'
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+import coordinate_system
+
 import numpy as np
 from scipy import ndimage
 
@@ -679,8 +685,11 @@ def main():
         # Convert nm -> full-image pixel coordinates
         if traj_data['format'] == 'pipeline':
             # Kevin's pipeline: coordinates already relative to whole image
-            traj_data['x_px_full'] = traj_data['x_nm'] / pixel_size
-            traj_data['y_px_full'] = traj_data['y_nm'] / pixel_size
+            traj_data['x_px_full'], traj_data['y_px_full'] = (
+                coordinate_system.automatic_nm_to_image_xy(
+                    traj_data['x_nm'], traj_data['y_nm'], pixel_size
+                )
+            )
         else:
             # ThunderSTORM legacy: coordinates relative to ROI crop
             # Try to find matching ROI for offset
@@ -691,11 +700,20 @@ def main():
                     roi_match = roi
                     break
             if roi_match:
-                traj_data['x_px_full'] = traj_data['x_nm'] / pixel_size + roi_match['left']
-                traj_data['y_px_full'] = traj_data['y_nm'] / pixel_size + roi_match['top']
+                traj_data['x_px_full'], traj_data['y_px_full'] = (
+                    coordinate_system.thunderstorm_roi_nm_to_image_xy(
+                        traj_data['x_nm'],
+                        traj_data['y_nm'],
+                        pixel_size,
+                        roi_match['left'],
+                        roi_match['top'],
+                    )
+                )
             else:
-                traj_data['x_px_full'] = traj_data['x_nm'] / pixel_size
-                traj_data['y_px_full'] = traj_data['y_nm'] / pixel_size
+                raise ValueError(
+                    f"Cannot place ROI-local ThunderSTORM trajectory {traj_path} "
+                    "without a matching Fiji ROI left/top edge offset."
+                )
 
         print(f"    Locus position (full-image px): "
               f"x={traj_data['x_px_full'].mean():.1f} "
@@ -709,7 +727,7 @@ def main():
             frame_idx = traj_data['frames'][i]
 
             # Frames are 1-indexed; masks are 0-indexed
-            mask_idx = frame_idx - 1
+            mask_idx = int(coordinate_system.csv_frame_to_array_index(frame_idx))
             if mask_idx < 0 or mask_idx >= n_frames:
                 n_skipped += 1
                 continue

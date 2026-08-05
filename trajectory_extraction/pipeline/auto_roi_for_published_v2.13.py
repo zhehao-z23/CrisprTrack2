@@ -36,6 +36,7 @@ import numpy as np
 from pathlib import Path
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
+import coordinate_system
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, 'reconfigure'):
@@ -338,6 +339,7 @@ def detect_signal_clusters(
     labeled, component_count = ndimage.label((avg > threshold) & valid)
     distance_inside = ndimage.distance_transform_edt(nucleus_mask)
     clusters = []
+    component_audit = []
     area_eligible = 0
     containment_rejected = 0
     edge_rejected = 0
@@ -345,19 +347,38 @@ def detect_signal_clusters(
         component = labeled == label_id
         size = int(component.sum())
         if size < min_px:
+            component_audit.append({
+                'component_id': int(label_id),
+                'size_px': size,
+                'decision': 'REJECT_MINIMUM_AREA',
+            })
             continue
         area_eligible += 1
         inside_fraction = float((component & nucleus_mask).sum() / size)
         if inside_fraction < REFERENCE_CONTAINMENT_FRACTION:
             containment_rejected += 1
+            component_audit.append({
+                'component_id': int(label_id),
+                'size_px': size,
+                'inside_fraction': inside_fraction,
+                'decision': 'REJECT_NOT_FULLY_CONTAINED',
+            })
             continue
         edge_fraction = float((distance_inside[component] <= edge_width_px).mean())
         if edge_fraction > maximum_edge_fraction:
             edge_rejected += 1
+            component_audit.append({
+                'component_id': int(label_id),
+                'size_px': size,
+                'inside_fraction': inside_fraction,
+                'edge_fraction': edge_fraction,
+                'decision': 'REJECT_EDGE_BAND_FRACTION',
+            })
             continue
         cy, cx = ndimage.center_of_mass(avg, labeled, label_id)
         rows, columns = np.where(component)
-        clusters.append({
+        candidate = {
+            'component_id': int(label_id),
             'centroid': (float(cy), float(cx)),
             'bbox': (
                 int(rows.min()), int(columns.min()),
@@ -367,6 +388,17 @@ def detect_signal_clusters(
             'size': size,
             'inside_fraction': inside_fraction,
             'edge_fraction': edge_fraction,
+        }
+        clusters.append(candidate)
+        component_audit.append({
+            'component_id': int(label_id),
+            'size_px': size,
+            'inside_fraction': inside_fraction,
+            'edge_fraction': edge_fraction,
+            'mean_intensity': candidate['intensity'],
+            'centroid_y_px': candidate['centroid'][0],
+            'centroid_x_px': candidate['centroid'][1],
+            'decision': 'ELIGIBLE_BEFORE_TOP_N',
         })
     clusters.sort(key=lambda cluster: cluster['intensity'], reverse=True)
     returned = clusters[:n_max]
@@ -384,9 +416,11 @@ def detect_signal_clusters(
         'edge_rejected_components': int(edge_rejected),
         'survivors_before_top_n': int(len(clusters)),
         'top_n': int(n_max),
+        'all_threshold_components': component_audit,
         'returned_components': [
             {
                 'rank': rank,
+                'component_id': cluster['component_id'],
                 'centroid_y_px': cluster['centroid'][0],
                 'centroid_x_px': cluster['centroid'][1],
                 'size_px': cluster['size'],
@@ -539,8 +573,9 @@ def save_trajectory_csv(indexed_pos: list, path: Path):
         writer = csv.writer(f)
         writer.writerow(['frame', 'x_nm', 'y_nm'])
         for frame_idx, y, x in indexed_pos:
-            x_nm = (x + 1) / PIXEL_SIZE_UM * 1000.0
-            y_nm = (y + 1) / PIXEL_SIZE_UM * 1000.0
+            pixel_size_nm = 1000.0 / PIXEL_SIZE_UM
+            x_nm = float(coordinate_system.image_px_to_automatic_nm(x, pixel_size_nm))
+            y_nm = float(coordinate_system.image_px_to_automatic_nm(y, pixel_size_nm))
             writer.writerow([frame_idx + 1, f'{x_nm:.2f}', f'{y_nm:.2f}'])
 
 
@@ -1115,6 +1150,7 @@ def main():
     reference_detection_audit.update({
         'reference_channel': reference_channel,
         'reference_tracking_k': float(reference_tracking_k),
+        'coordinate_contract': coordinate_system.contract_manifest(),
         'mask_occupancy_fraction': REFERENCE_MASK_OCCUPANCY_FRACTION,
         'selection_order': [
             'global connected components on the valid time-average image',
@@ -1143,6 +1179,7 @@ def main():
 
     accepted    = []
     accepted_rois = []
+    reference_tracking_audit = []
 
     for idx, spot in enumerate(reference_clusters):
         cy, cx = spot['centroid']
@@ -1155,6 +1192,11 @@ def main():
         print(f"    {reference_channel.capitalize()} tracked in {len(indexed_pos)}/{n_frames} frames")
         if not indexed_pos:
             print(f"    ✗ Skipped: reference spot not trackable")
+            reference_tracking_audit.append({
+                'seed_rank': idx + 1,
+                'decision': 'REJECT_NOT_TRACKABLE',
+                'trajectory_points': 0,
+            })
             continue
 
         checkable = [(t, fy, fx) for t, fy, fx in indexed_pos
@@ -1166,6 +1208,14 @@ def main():
             print(f"    ✗ Skipped: {len(outside)}/{len(checkable)} checkable frames "
                   f"({100*frac_outside:.1f}%) outside nucleus mask "
                   f"(limit {100*NUCLEUS_OUTSIDE_FRAC:.0f}%)")
+            reference_tracking_audit.append({
+                'seed_rank': idx + 1,
+                'decision': 'REJECT_TRACK_OUTSIDE_NUCLEUS',
+                'trajectory_points': len(indexed_pos),
+                'checkable_points': len(checkable),
+                'outside_points': len(outside),
+                'outside_fraction': frac_outside,
+            })
             continue
         if outside:
             print(f"    ~ {len(outside)}/{len(checkable)} frame(s) outside nucleus "
@@ -1184,6 +1234,17 @@ def main():
         label = idx + 1
         accepted.append((label, indexed_pos, (t_roi, l, b, r), (cy, cx)))
         accepted_rois.append(roi_dict(t_roi, l, b, r, label))
+        reference_tracking_audit.append({
+            'seed_rank': idx + 1,
+            'output_locus': label,
+            'decision': 'ACCEPT',
+            'trajectory_points': len(indexed_pos),
+            'frame_start_1based': int(indexed_pos[0][0] + 1),
+            'frame_end_1based': int(indexed_pos[-1][0] + 1),
+            'checkable_points': len(checkable),
+            'outside_points': len(outside),
+            'outside_fraction': frac_outside,
+        })
 
         reference_csv = out_dir / f'{reference_prefix}_loci{label}_traj_rela2wholeimg.csv'
         save_trajectory_csv(indexed_pos, reference_csv)
@@ -1193,8 +1254,18 @@ def main():
             break
 
     if not accepted:
+        reference_detection_audit['reference_tracking'] = reference_tracking_audit
+        (out_dir / 'reference_detection_audit.json').write_text(
+            json.dumps(reference_detection_audit, indent=2), encoding='utf-8'
+        )
         print(f"\nNo {reference_channel} reference loci accepted. Exiting.")
         sys.exit(0)
+
+    reference_detection_audit['reference_tracking'] = reference_tracking_audit
+    reference_detection_audit['accepted_reference_count'] = len(accepted)
+    (out_dir / 'reference_detection_audit.json').write_text(
+        json.dumps(reference_detection_audit, indent=2), encoding='utf-8'
+    )
 
     # ╔══════════════════════════════════════════════════════════════════════╗
     # ║  Overlap detection                                                  ║

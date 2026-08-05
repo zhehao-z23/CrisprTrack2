@@ -293,7 +293,7 @@ def main() -> None:
     parser.add_argument("--microsam-mask", type=Path)
     parser.add_argument("--alignment-channel", choices=("auto", "nucleus", "green"), default="auto")
     parser.add_argument("--raw-channel-index", type=int)
-    parser.add_argument("--dilation-px", type=int, default=5)
+    parser.add_argument("--dilation-px", type=int, default=0)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 

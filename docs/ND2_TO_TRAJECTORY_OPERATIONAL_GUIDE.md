@@ -1,6 +1,9 @@
 # OligoLiveFish: ND2 to cleaned SPT trajectories
 
-Current development version: **v5.0.0-dev1-trackmem-global-gap**.
+Current production candidate: **v5.1.0**. The final scientific rules and
+derivations in [`V5_1_FINAL_ANALYSIS_STRATEGY_CN.md`](V5_1_FINAL_ANALYSIS_STRATEGY_CN.md)
+override older v5-dev1 parameter descriptions retained later in this historical
+operational guide.
 
 This directory is an independent v5 development snapshot. The audited
 v4.2.2 source remains unchanged in the sibling directory
@@ -363,23 +366,23 @@ ASCII directory link. The TIFF filename itself must be ASCII and retain `.tif`.
 
 ### Metadata-to-physics max-step model
 
-Unless `--max-step-px` is supplied, v4 derives the linking radius from TIFF
-metadata and declared physical priors:
+Unless `--max-step-px` is supplied, v5.1 derives one movie-level linking radius
+from exact crop-sidecar intervals and locked physical priors:
 
 ```text
-tau = frame_gap * frame_interval_s
-r_p(tau) = sqrt[-4 ln(1-p) * (D_star * tau^alpha + sigma_loc^2)]
-max_step_px = ceil[(r_p / pixel_size_um) / rounding_increment] * rounding_increment
+v_i = D_star * dt_i^alpha + sigma_loc^2
+p_i(r) = 1 - exp[-r^2/(4*v_i)]
+Q(r) = product_i p_i(r)
+solve Q(r)=0.975; max_step_px=ceil_0.05(r/pixel_size_um)
 ```
 
-Locked defaults are `D*=0.0041 um^2/s^alpha`, `alpha=0.38`, `p=0.995`,
-`sigma_loc=0 nm`, adjacent `frame_gap=1`, and upward rounding to `0.05 px`.
-For the validated FOV15 metadata (`1.0114487 s/frame`, `0.1083333 um/px`), the
-theoretical value is `2.726893 px` and the operational value is `2.75 px`.
+Locked defaults are `D*=0.0041 um^2/s^alpha`, `alpha=0.38`,
+`sigma_loc=0 nm`, trajectory coverage `Q=0.975`, and upward rounding to
+`0.05 px`. FOV7 exact timestamps give `3.2980046 px`, rounded to `3.30 px`.
+Other movies use the same rule; D is not re-fit per cell or ND2.
 
 `trackMem=3` is unchanged. The current MATLAB linker uses the same operational
-radius after a gap; gap-specific radii are written to the audit JSON as
-sensitivity values but are **not** silently applied.
+radius after a gap; gap-specific radii are **not** applied.
 
 ### Step 4 parameters
 
@@ -392,14 +395,13 @@ sensitivity values but are **not** silently applied.
 | `--matlab-save-filter-images` | off | Retain large filtered movies in MAT files. |
 | `--experiment-profile` | required | `chr3_sites_2_3_4` or `dsb_53bp1_site1_site2`; locks channel identity and anchor. |
 | `--microsam-mask` | associated mask | Explicit mask override; normally do not use. |
-| `--mask-dilation-px` | `5` | Expansion after drift alignment. |
+| `--mask-dilation-px` | `0` | Final default: no micro-SAM support expansion after drift alignment. |
 | `--roi-geometry` | `tube` | Static anchor ROI seed: ordered-path `tube`, or filled `convex_hull`. |
 | `--roi-dilation-px` | `5` | Anchor centerline expansion; minimum `5`. |
 | `--d-star` | `0.0041` | Anomalous diffusion prior in `um^2/s^alpha`. |
 | `--alpha` | `0.38` | Anomalous exponent. |
-| `--coverage-probability` | `0.995` | Radial quantile `p`. |
+| `--trajectory-coverage-probability` | `0.975` | Whole-acquisition no-model-step-exceedance probability. |
 | `--localization-error-nm` | `0` | Per-axis localization error term. |
-| `--max-step-frame-gap` | `1` | Lag used to calculate the one operational radius. |
 | `--max-step-rounding-px` | `0.05` | Upward rounding increment. |
 | `--max-step-px` | model | Explicit positive override; recorded in the audit. |
 | `--no-fiji` | off | Reuse existing Fiji outputs. The original crop is still required for mask alignment. |
@@ -498,7 +500,7 @@ and `--dry-run`.
     log_anchor_roi_v4.txt
     mask_alignment\
       microsam_mask_aligned_raw.tif
-      microsam_mask_aligned_dilated_5px.tif
+      microsam_mask_aligned_dilated_0px.tif
       drift_alignment.csv
       mask_alignment_audit.json
       microsam_mask_alignment_qc.png

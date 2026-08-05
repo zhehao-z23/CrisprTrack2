@@ -164,25 +164,42 @@ class MaxStepModelTests(unittest.TestCase):
             self.assertEqual(metadata["spatial_unit"], "um")
             self.assertEqual(metadata["frame_count"], 2)
 
-    def test_fov15_metadata_reproduces_approved_radius(self):
+    def test_literal_micro_sign_spatial_units_are_normalized(self):
+        for unit in ("\u00b5m", "\u03bcm"):
+            with self.subTest(unit=unit):
+                self.assertEqual(max_step_model.normalize_spatial_unit(unit), "um")
+
+    def test_50_frame_movie_uses_whole_trajectory_coverage(self):
         metadata = {
-            "frame_interval_s": 1.0114487409591675,
+            "frame_interval_s": 1.0715574026107788,
             "pixel_size_x_um_per_px": 0.10833333604166673,
+            "frame_count": 50,
         }
         result = max_step_model.derive_from_metadata(metadata)
         self.assertTrue(
             math.isclose(
                 result["calculation"]["theoretical_radius_px"],
-                2.7268931949549495,
+                3.2950548844669045,
                 rel_tol=1e-12,
             )
         )
-        self.assertEqual(result["modeled_max_step_px"], 2.75)
-        self.assertEqual(result["operational_source"], "metadata + physical prior + upward rounding")
+        self.assertAlmostEqual(result["modeled_max_step_px"], 3.30)
+        self.assertEqual(
+            result["operational_source"],
+            "locked prior + movie timing + trajectory coverage + upward rounding",
+        )
+        self.assertAlmostEqual(
+            result["coverage_policy"]["one_sided_at_least_one_exceedance_probability"],
+            0.025,
+        )
         self.assertFalse(result["tracker_implementation"]["gap_scaled_radius_implemented"])
 
     def test_explicit_override_is_audited(self):
-        metadata = {"frame_interval_s": 1.0, "pixel_size_x_um_per_px": 0.1}
+        metadata = {
+            "frame_interval_s": 1.0,
+            "pixel_size_x_um_per_px": 0.1,
+            "frame_count": 50,
+        }
         result = max_step_model.derive_from_metadata(metadata, explicit_max_step_px=3.0)
         self.assertEqual(result["operational_max_step_px"], 3.0)
         self.assertEqual(result["operational_source"], "explicit CLI override")

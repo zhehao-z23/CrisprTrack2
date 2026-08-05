@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v5.0.0-dev1-trackmem-global-gap"
+VERSION = "v5.1.0"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 
@@ -51,13 +51,16 @@ def scientific_options(args: argparse.Namespace) -> dict:
     return {
         "experiment_profile": args.experiment_profile,
         "mask_dilation_px": args.mask_dilation_px,
+        "reference_seed_k": args.reference_seed_k,
+        "reference_tracking_k": args.reference_tracking_k,
+        "reference_edge_width_px": args.reference_edge_width_px,
+        "reference_max_edge_fraction": args.reference_max_edge_fraction,
         "roi_geometry": args.roi_geometry,
         "roi_dilation_px": args.roi_dilation_px,
         "d_star": args.d_star,
         "alpha": args.alpha,
-        "coverage_probability": args.coverage_probability,
+        "trajectory_coverage_probability": args.trajectory_coverage_probability,
         "localization_error_nm": args.localization_error_nm,
-        "max_step_frame_gap": args.max_step_frame_gap,
         "max_step_rounding_px": args.max_step_rounding_px,
         "max_step_px": args.max_step_px,
         "matlab_workers": args.matlab_workers,
@@ -114,15 +117,20 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         "--matlab-workers", str(args.matlab_workers),
         "--experiment-profile", args.experiment_profile,
         "--mask-dilation-px", str(args.mask_dilation_px),
+        "--reference-edge-width-px", str(args.reference_edge_width_px),
+        "--reference-max-edge-fraction", str(args.reference_max_edge_fraction),
         "--roi-geometry", args.roi_geometry,
         "--roi-dilation-px", str(args.roi_dilation_px),
         "--d-star", str(args.d_star),
         "--alpha", str(args.alpha),
-        "--coverage-probability", str(args.coverage_probability),
+        "--trajectory-coverage-probability", str(args.trajectory_coverage_probability),
         "--localization-error-nm", str(args.localization_error_nm),
-        "--max-step-frame-gap", str(args.max_step_frame_gap),
         "--max-step-rounding-px", str(args.max_step_rounding_px),
     ]
+    if args.reference_seed_k is not None:
+        command.extend(["--reference-seed-k", str(args.reference_seed_k)])
+    if args.reference_tracking_k is not None:
+        command.extend(["--reference-tracking-k", str(args.reference_tracking_k)])
     if args.max_step_px is not None:
         command.extend(["--max-step-px", str(args.max_step_px)])
     if args.matlab_save_filter_images:
@@ -175,7 +183,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cell-workers", type=int, default=1)
     parser.add_argument("--matlab-workers", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--matlab-save-filter-images", action="store_true")
-    parser.add_argument("--mask-dilation-px", type=int, default=5)
+    parser.add_argument("--mask-dilation-px", type=int, default=0)
+    parser.add_argument("--reference-seed-k", type=float)
+    parser.add_argument("--reference-tracking-k", type=float)
+    parser.add_argument("--reference-edge-width-px", type=float, default=3.0)
+    parser.add_argument("--reference-max-edge-fraction", type=float, default=0.10)
     parser.add_argument(
         "--roi-geometry",
         choices=("tube", "convex_hull"),
@@ -184,9 +196,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)
-    parser.add_argument("--coverage-probability", type=float, default=0.995)
+    parser.add_argument("--trajectory-coverage-probability", type=float, default=0.975)
     parser.add_argument("--localization-error-nm", type=float, default=0.0)
-    parser.add_argument("--max-step-frame-gap", type=int, default=1)
     parser.add_argument("--max-step-rounding-px", type=float, default=0.05)
     parser.add_argument("--max-step-px", type=float)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)

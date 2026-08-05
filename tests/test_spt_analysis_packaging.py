@@ -75,10 +75,12 @@ class SptAnalysisPackagingTests(unittest.TestCase):
                 metadata["full_archive"], "r:gz"
             ) as archive:
                 full_names = set(archive.getnames())
-            crop_name = str(crop.relative_to(project))
-            derived_name = str(
-                (derived / "cell_1_green.tif").relative_to(project)
-            )
+            # tar member names always use POSIX separators, including when the
+            # package is built and tested on Windows.
+            crop_name = crop.relative_to(project).as_posix()
+            derived_name = (
+                derived / "cell_1_green.tif"
+            ).relative_to(project).as_posix()
             self.assertNotIn(crop_name, core_names)
             self.assertIn(crop_name, full_names)
             self.assertNotIn(derived_name, full_names)

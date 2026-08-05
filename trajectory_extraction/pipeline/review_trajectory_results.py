@@ -40,6 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
+import coordinate_system
 
 from summarize_match_filter_qc import (
     MAX_AVG_DIST_NM,
@@ -196,7 +197,9 @@ def plot_tracks_on_mips(paths: list[Path], tiffs: dict[str, Path], pixel_size_nm
         axis.imshow(display_mip(stack), cmap="gray", origin="upper")
         for path in paths_by_channel[code]:
             _, x_nm, y_nm = track_arrays(path)
-            x_px, y_px = x_nm / pixel_size_nm, y_nm / pixel_size_nm
+            x_px, y_px = coordinate_system.automatic_nm_to_image_xy(
+                x_nm, y_nm, pixel_size_nm
+            )
             axis.plot(x_px, y_px, color=color, linewidth=1.8, label=trajectory_label(path))
             axis.scatter(x_px[0], y_px[0], color=color, edgecolor="white", linewidth=0.35, s=25, marker="o", zorder=3)
             axis.scatter(x_px[-1], y_px[-1], color=color, edgecolor="white", linewidth=0.35, s=30, marker="s", zorder=3)
@@ -249,7 +252,7 @@ def main() -> None:
 
     manifest = {
         "status": "PASS",
-        "coordinate_system": "trajectory CSVs are whole-image nanometres; MIP overlay converts nm to px using TIFF calibration",
+        "coordinate_system": coordinate_system.contract_manifest(),
         "stage3_parameters": {
             "minimum_overlap_frames": MIN_OVERLAP_FRAMES,
             "maximum_average_distance_nm": MAX_AVG_DIST_NM,

@@ -5,17 +5,16 @@ Automated, profile-locked trajectory extraction and single-particle tracking
 single-cell, multi-channel TIFF plus its acquisition sidecar and exact
 micro-SAM mask into audited 2-D Gaussian trajectories for the G/R/P channels.
 
-The current code version is **`v5.0.0-dev1-trackmem-global-gap`**. The production
+The current code version is **`v5.1.0`**. The production
 entry points are still named `run_full_pipeline_v4.py` and
 `run_batch_pipeline_v4.py`, and result directories still begin with
 `anchor_roi_v4_`. Those names and the output layout are intentionally retained
 for compatibility; runtime manifests identify the run as v5.
 
-v5 dev1 changes one tracking boundary relative to the audited v4.2.2 baseline:
-a frame in which no particle is detected anywhere in an ROI no longer forces a
-split when the number of globally missing frames is less than or equal to
-`trackMem`. All other detection, localization, ROI, linking-radius, and
-baseline-selection rules remain unchanged.
+v5.1 retains the v5 dev1 global-gap rule and fixes the reviewed mask,
+reference, movie-level `max_disp`, and coordinate policies. See
+[`../docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md`](../docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md)
+for the complete derivation and end-to-end review contract.
 
 ## Quick Start
 
@@ -329,14 +328,17 @@ trajectory_batch_v4_<experiment_profile>_summary.csv
 | `--matlab-workers` | `1` | Concurrent G/R/P MATLAB groups; allowed values are 1, 2, or 3. |
 | `--matlab-save-filter-images` | off | Retain the large band-pass-filtered movie in MAT output. |
 | `--microsam-mask` | associated mask | Explicit exact-mask override; normally do not use. |
-| `--mask-dilation-px` | `5` | Expansion after per-frame drift alignment. |
+| `--mask-dilation-px` | `0` | Final nucleus-support default: no expansion after drift alignment. |
+| `--reference-seed-k` | profile default | DSB Purple uses `1.645` on the time-average image. |
+| `--reference-tracking-k` | profile default | DSB Purple uses `0.5` for per-frame tracking. |
+| `--reference-edge-width-px` | `3` | Inner consensus-mask boundary band. |
+| `--reference-max-edge-fraction` | `0.10` | Maximum component fraction in the boundary band. |
 | `--roi-geometry` | `tube` | Ordered anchor-path tube, or `convex_hull`. |
 | `--roi-dilation-px` | `5` | Static ROI expansion. Production requires at least 5 px. |
 | `--d-star` | `0.0041` | Anomalous diffusion prior in µm²/s^alpha. |
 | `--alpha` | `0.38` | Anomalous diffusion exponent. |
-| `--coverage-probability` | `0.995` | Radial coverage probability `p`. |
+| `--trajectory-coverage-probability` | `0.975` | Whole-acquisition probability that no adjacent model step exceeds the gate. |
 | `--localization-error-nm` | `0` | Per-axis localization-error term. |
-| `--max-step-frame-gap` | `1` | Lag used to calculate the one operational radius. |
 | `--max-step-rounding-px` | `0.05` | Upward pixel-rounding increment. |
 | `--max-step-px` | physical model | Explicit positive override, recorded in the audit. |
 | `--no-fiji` | off | Reuse an existing corrected analysis directory. |
@@ -357,9 +359,11 @@ not free-form production CLI parameters.
 
 | Parameter | Value | Description |
 | --- | ---: | --- |
-| `K_SIGNAL['green']` | `2.0` | Green threshold multiplier, `mean + k * std`. |
-| `K_SIGNAL['red']` | `0.5` | Red threshold multiplier. |
-| `K_SIGNAL['purple']` | `0.5` | Purple threshold multiplier. |
+| `REFERENCE_SEED_K['purple']` | `1.645` | DSB Purple time-average seed multiplier. |
+| `REFERENCE_TRACKING_K['purple']` | `0.5` | Independent per-frame Purple reference multiplier. |
+| `REFERENCE_CONTAINMENT_FRACTION` | `1.0` | Every component pixel must be inside consensus support. |
+| `REFERENCE_EDGE_WIDTH_PX` | `3` | Inner nuclear boundary band. |
+| `REFERENCE_MAX_EDGE_FRACTION` | `0.10` | Maximum component occupancy of that band. |
 | `NUCLEUS_OUTSIDE_FRAC` | `0.10` | Reject an anchor when more than 10% of checkable positions are outside supplied support. |
 | `MIN_SPOT_PX` | `10` | Minimum connected-component area. |
 | `N_MAX` | `5` | Maximum accepted anchor loci. |
@@ -380,7 +384,7 @@ from the aligned micro-SAM mask and is not rebuilt from intensity/Otsu.
 
 For `tube`, the complete time-ordered anchor path is rasterized as one
 centerline. For `convex_hull`, its concavities are filled first. Both are
-dilated by `roi-dilation-px`, intersected with frame 1 of the aligned/dilated
+dilated by `roi-dilation-px`, intersected with frame 1 of the drift-aligned
 micro-SAM support, required to remain connected, and then reused unchanged for
 all movie frames.
 
@@ -398,20 +402,20 @@ backward-compatible `anchor_roi_v4_<experiment_profile>` path.
 Unless `--max-step-px` is supplied, the operational linking radius is:
 
 ```text
-tau = frame_gap * frame_interval_s
-r_p(tau) = sqrt[-4 ln(1-p) * (D_star * tau^alpha + sigma_loc^2)]
-max_step_px = ceil[(r_p / pixel_size_um) / rounding_increment]
-              * rounding_increment
+v_i = D_star * dt_i^alpha + sigma_loc^2
+p_i(r) = 1 - exp[-r^2 / (4*v_i)]
+Q(r) = product_i p_i(r)
+solve Q(r) = 0.975
+max_step_px = ceil_0.05(r / pixel_size_um)
 ```
 
-Locked defaults are `D_star=0.0041 µm²/s^alpha`, `alpha=0.38`, `p=0.995`,
-`sigma_loc=0 nm`, `frame_gap=1`, and upward rounding to `0.05 px`. For the
-validated FOV15 metadata (`1.0114487 s/frame`, `0.1083333 µm/px`), the
-theoretical radius is `2.726893 px` and the operational radius is `2.75 px`.
-
-The model writes sensitivity values for other gaps, but the current linker
-uses the same one operational `max_disp` after every allowed gap. v5 dev1 does
-not silently apply gap-scaled radii.
+Locked defaults are `D_star=0.0041 µm²/s^alpha`, `alpha=0.38`,
+`sigma_loc=0 nm`, and whole-acquisition `Q=0.975`. Exact adjacent intervals
+come from the crop sidecar; a repeated TIFF interval is an explicitly audited
+fallback. No per-cell/per-ND2 D fit is performed. FOV7 gives a theoretical
+`3.2980046 px` and operational `3.30 px`; other ND2 files are derived by the
+same rule rather than hardcoding 3.30. The current linker uses the same scalar
+after every allowed gap and does not apply a gap-scaled radius.
 
 ### MATLAB SPT parameters
 
@@ -489,7 +493,7 @@ All output is written beside the input crop. The primary tree is:
     log_anchor_roi_v4.txt
     mask_alignment/
       microsam_mask_aligned_raw.tif
-      microsam_mask_aligned_dilated_5px.tif
+      microsam_mask_aligned_dilated_0px.tif
       drift_alignment.csv
       mask_alignment_audit.json
       microsam_mask_alignment_qc.png

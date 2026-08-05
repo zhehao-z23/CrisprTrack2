@@ -1,4 +1,4 @@
-# Trajectory CLI quick reference — v4.1.5 experiment profiles
+# Trajectory CLI quick reference — v5.1
 
 The root [README.md](README.md) is authoritative. Every production trajectory
 run must select exactly one locked biological profile. The anchor is derived
@@ -37,11 +37,13 @@ documented scientific reason:
   --fiji-bin $Fiji `
   --matlab-bin $Matlab `
   --experiment-profile chr3_sites_2_3_4 `
-  --max-step-px 2.75
+  --max-step-px 3.30
 ```
 
-`audit\max_step_model.json` records whether the operational value came from the
-model or the override.
+`3.30` is only the reviewed FOV7 example. The default derives an ND2/movie-level
+value from exact sidecar intervals, locked `D*=0.0041`, `alpha=0.38`, and 97.5%
+whole-acquisition coverage. `audit\max_step_model.json` records whether the
+operational value came from that model or an override.
 
 ## FOV batch preflight and run
 

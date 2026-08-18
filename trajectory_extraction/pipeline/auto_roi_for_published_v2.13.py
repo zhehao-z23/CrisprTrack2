@@ -102,6 +102,15 @@ INTER_FRAME_MAX_NM_RED = 750   # relaxed for red: 90th-percentile observed jump 
 # Maximum distance from the reference spot in the same frame for target channels (µm).
 REFERENCE_PROX_MAX_UM = 3.0
 
+# DSB v5.2: Purple only gates the Red search support and supplies the canonical
+# allele identity.  Red trajectories themselves are linked by Red continuity.
+DSB_RED_HARVEST_RADIUS_UM = 2.5
+DSB_RED_MIN_TRACK_POINTS = 5
+DSB_RED_MIN_SHARED_FRAMES = 5
+DSB_RED_MIN_MOVIE_COVERAGE_FRACTION = 0.25
+DSB_RED_UNIQUENESS_MARGIN_PX = 1.0
+DSB_RED_MAX_MISSING_FRAMES = 1
+
 # Give up seeding a purple/red trajectory if no match is found in first N frames.
 SEED_MAX_FRAME = 5
 
@@ -893,6 +902,262 @@ def match_seeds_to_reference(seed_trajs: list, seed_ks: list,
     return assignments
 
 
+def build_p_gated_red_candidates(
+    stack: np.ndarray,
+    reference_trajs_dict: dict,
+    nucleus_masks: list,
+    *,
+    k: float,
+    harvest_radius_px: float,
+    inter_frame_max_px: float,
+    minimum_points: int,
+    maximum_missing_frames: int,
+) -> tuple[list[list[tuple[int, float, float]]], list[dict]]:
+    """Harvest near P, then link strictly by Red continuity.
+
+    P positions only gate per-frame Red detections.  Linking uses Red endpoints
+    alone, gives immediately adjacent frames first priority, and then permits a
+    fixed number of missing frames within the same ``inter_frame_max_px``.
+    Missing positions are never interpolated and P is never used as a fallback.
+    """
+    reference_by_frame = defaultdict(list)
+    for label, trajectory in reference_trajs_dict.items():
+        for frame, y, x in trajectory:
+            reference_by_frame[int(frame)].append((int(label), float(y), float(x)))
+
+    tracks: list[list[tuple[int, float, float]]] = []
+    detection_audit: list[dict] = []
+    active_indices: list[int] = []
+    for frame_index, frame in enumerate(stack):
+        references = reference_by_frame.get(frame_index, [])
+        candidates = []
+        valid = compute_valid_mask(frame)
+        mean = float(frame[valid].mean())
+        standard_deviation = float(frame[valid].std())
+        labeled, component_count = ndimage.label(
+            (frame > mean + k * standard_deviation) & valid
+        )
+        sizes, centroids = component_sizes_and_centroids(
+            labeled, component_count, weights=frame
+        )
+        for component_id, (size, (y, x)) in enumerate(
+            zip(sizes, centroids), start=1
+        ):
+            if int(size) < MIN_SPOT_PX:
+                continue
+            if nucleus_masks[frame_index] is not None and not point_in_mask(
+                y, x, nucleus_masks[frame_index]
+            ):
+                continue
+            distances = [
+                (float(np.hypot(y - py, x - px)), label)
+                for label, py, px in references
+            ]
+            if not distances:
+                continue
+            nearest_distance, nearest_label = min(distances)
+            if nearest_distance > harvest_radius_px:
+                continue
+            candidates.append((float(y), float(x), int(component_id), int(size)))
+            detection_audit.append({
+                "frame": int(frame_index + 1),
+                "candidate_in_frame": int(len(candidates)),
+                "component_id": int(component_id),
+                "area_px": int(size),
+                "y_px": float(y),
+                "x_px": float(x),
+                "nearest_p_locus": int(nearest_label),
+                "nearest_p_distance_px": float(nearest_distance),
+                "harvest_radius_px": float(harvest_radius_px),
+            })
+
+        matched_tracks: set[int] = set()
+        matched_candidates: set[int] = set()
+        # Cascade by temporal distance so an adjacent-frame Red continuation
+        # always has priority over an older fragment.  This preserves R-only
+        # identity while tolerating short segmentation/detection dropouts.
+        for frame_delta in range(1, maximum_missing_frames + 2):
+            previous = [
+                track_index for track_index in active_indices
+                if track_index not in matched_tracks
+                and tracks[track_index][-1][0] == frame_index - frame_delta
+            ]
+            remaining_candidates = [
+                candidate_index for candidate_index in range(len(candidates))
+                if candidate_index not in matched_candidates
+            ]
+            if not previous or not remaining_candidates:
+                continue
+            cost = np.full((len(previous), len(candidates)), 1e9, dtype=float)
+            for row, track_index in enumerate(previous):
+                _last_frame, last_y, last_x = tracks[track_index][-1]
+                for column in remaining_candidates:
+                    y, x, _component_id, _size = candidates[column]
+                    distance = float(np.hypot(y - last_y, x - last_x))
+                    if distance <= inter_frame_max_px:
+                        cost[row, column] = distance
+            rows, columns = linear_sum_assignment(cost)
+            for row, column in zip(rows, columns):
+                if cost[row, column] >= 1e9:
+                    continue
+                track_index = previous[row]
+                y, x, _component_id, _size = candidates[column]
+                tracks[track_index].append((frame_index, y, x))
+                matched_tracks.add(track_index)
+                matched_candidates.add(int(column))
+
+        for candidate_index, (y, x, _component_id, _size) in enumerate(candidates):
+            if candidate_index in matched_candidates:
+                continue
+            tracks.append([(frame_index, y, x)])
+            matched_tracks.add(len(tracks) - 1)
+        active_indices = sorted(
+            {
+                track_index for track_index in active_indices
+                if frame_index - tracks[track_index][-1][0] <= maximum_missing_frames
+            }
+            | matched_tracks
+        )
+
+    retained_with_source = [
+        (source_index, track)
+        for source_index, track in enumerate(tracks)
+        if len(track) >= minimum_points
+    ]
+    retained_with_source.sort(
+        key=lambda item: (-len(item[1]), item[1][0][0], item[1][0][2], item[1][0][1])
+    )
+    retained_id = {
+        source_index: candidate_index
+        for candidate_index, (source_index, _track) in enumerate(
+            retained_with_source, start=1
+        )
+    }
+    detection_to_track = {}
+    for source_index, track in enumerate(tracks):
+        for frame, y, x in track:
+            detection_to_track[(int(frame + 1), round(y, 6), round(x, 6))] = source_index
+    for row in detection_audit:
+        source_index = detection_to_track.get(
+            (row["frame"], round(row["y_px"], 6), round(row["x_px"], 6))
+        )
+        row["red_candidate"] = retained_id.get(source_index, "")
+        row["retained_minimum_points"] = source_index in retained_id
+    retained = [track for _source_index, track in retained_with_source]
+    return retained, detection_audit
+
+
+def pair_red_candidates_to_purple(
+    red_candidates: list[list[tuple[int, float, float]]],
+    reference_trajs_dict: dict,
+    *,
+    maximum_median_distance_px: float,
+    minimum_shared_frames: int,
+    movie_frame_count: int,
+    minimum_movie_coverage_fraction: float,
+    uniqueness_margin_px: float,
+) -> tuple[dict, list[dict], list[dict]]:
+    """Pair independent Red tracks by common-frame median P-R distance."""
+    effective_minimum_shared_frames = max(
+        minimum_shared_frames,
+        int(np.ceil(movie_frame_count * minimum_movie_coverage_fraction)),
+    )
+    labels = sorted(reference_trajs_dict)
+    p_by_label = {
+        label: {int(frame): (float(y), float(x)) for frame, y, x in trajectory}
+        for label, trajectory in reference_trajs_dict.items()
+    }
+    n_red, n_p = len(red_candidates), len(labels)
+    median = np.full((n_red, n_p), np.inf, dtype=float)
+    shared_count = np.zeros((n_red, n_p), dtype=int)
+    p95 = np.full((n_red, n_p), np.nan, dtype=float)
+    per_frame_rows: list[dict] = []
+    for red_index, trajectory in enumerate(red_candidates):
+        r_by_frame = {
+            int(frame): (float(y), float(x)) for frame, y, x in trajectory
+        }
+        for p_index, label in enumerate(labels):
+            shared = sorted(set(r_by_frame) & set(p_by_label[label]))
+            distances = []
+            for frame in shared:
+                ry, rx = r_by_frame[frame]
+                py, px = p_by_label[label][frame]
+                distance = float(np.hypot(ry - py, rx - px))
+                distances.append(distance)
+                per_frame_rows.append({
+                    "frame": int(frame + 1),
+                    "p_locus": int(label),
+                    "r_candidate": int(red_index + 1),
+                    "p_x_px": px,
+                    "p_y_px": py,
+                    "r_x_px": rx,
+                    "r_y_px": ry,
+                    "distance_px": distance,
+                })
+            shared_count[red_index, p_index] = len(shared)
+            if len(shared) >= minimum_shared_frames:
+                median[red_index, p_index] = float(np.median(distances))
+                p95[red_index, p_index] = float(np.percentile(distances, 95))
+
+    valid_cost = np.where(
+        (shared_count >= effective_minimum_shared_frames)
+        & (median <= maximum_median_distance_px),
+        median,
+        1e9,
+    )
+    assignments = {}
+    pair_rows: list[dict] = []
+    if n_red and n_p:
+        rows, columns = linear_sum_assignment(valid_cost)
+        for red_index, p_index in zip(rows, columns):
+            label = labels[p_index]
+            distance = float(valid_cost[red_index, p_index])
+            competing_r = np.delete(valid_cost[:, p_index], red_index)
+            competing_p = np.delete(valid_cost[red_index, :], p_index)
+            next_r = float(np.min(competing_r)) if competing_r.size else np.inf
+            next_p = float(np.min(competing_p)) if competing_p.size else np.inf
+            r_margin = next_r - distance
+            p_margin = next_p - distance
+            reciprocal_best = (
+                distance < 1e9
+                and red_index == int(np.argmin(valid_cost[:, p_index]))
+                and p_index == int(np.argmin(valid_cost[red_index, :]))
+            )
+            unique = (
+                reciprocal_best
+                and r_margin >= uniqueness_margin_px
+                and p_margin >= uniqueness_margin_px
+            )
+            if unique:
+                assignments[int(label)] = red_candidates[red_index]
+            pair_rows.append({
+                "p_locus": int(label),
+                "r_candidate": int(red_index + 1),
+                "r_points": int(len(red_candidates[red_index])),
+                "movie_frames": int(movie_frame_count),
+                "movie_coverage_fraction": float(
+                    len(red_candidates[red_index]) / movie_frame_count
+                ),
+                "common_frames": int(shared_count[red_index, p_index]),
+                "minimum_required_common_frames": int(
+                    effective_minimum_shared_frames
+                ),
+                "median_distance_px": (
+                    float(median[red_index, p_index])
+                    if np.isfinite(median[red_index, p_index]) else ""
+                ),
+                "p95_distance_px": (
+                    float(p95[red_index, p_index])
+                    if np.isfinite(p95[red_index, p_index]) else ""
+                ),
+                "next_r_margin_px": r_margin if np.isfinite(r_margin) else "inf",
+                "next_p_margin_px": p_margin if np.isfinite(p_margin) else "inf",
+                "reciprocal_best": bool(reciprocal_best),
+                "decision": "ACCEPT_UNIQUE" if unique else "REJECT_AMBIGUOUS_OR_OUTSIDE",
+            })
+    return assignments, pair_rows, per_frame_rows
+
+
 def propagate_from_seed(stack: np.ndarray, roi: tuple, seed_traj: list,
                          reference_indexed_pos: list, reference_centroid_avg: tuple,
                          k: float, inter_frame_max_px: float = None) -> list:
@@ -1017,6 +1282,37 @@ def main():
         default=REFERENCE_MAX_EDGE_FRACTION,
         help="Maximum fraction of an intact reference component inside the boundary band.",
     )
+    parser.add_argument(
+        "--target-reference-mode",
+        choices=("legacy", "p_gated_r_autonomous"),
+        default="legacy",
+        help=(
+            "legacy keeps historical target tracking; p_gated_r_autonomous "
+            "uses P only for Red harvest/pairing and links Red by its own continuity."
+        ),
+    )
+    parser.add_argument(
+        "--red-harvest-radius-um", type=float, default=DSB_RED_HARVEST_RADIUS_UM
+    )
+    parser.add_argument(
+        "--red-min-track-points", type=int, default=DSB_RED_MIN_TRACK_POINTS
+    )
+    parser.add_argument(
+        "--red-min-shared-frames", type=int, default=DSB_RED_MIN_SHARED_FRAMES
+    )
+    parser.add_argument(
+        "--red-min-movie-coverage-fraction",
+        type=float,
+        default=DSB_RED_MIN_MOVIE_COVERAGE_FRACTION,
+    )
+    parser.add_argument(
+        "--red-max-missing-frames", type=int, default=DSB_RED_MAX_MISSING_FRAMES
+    )
+    parser.add_argument(
+        "--red-uniqueness-margin-px",
+        type=float,
+        default=DSB_RED_UNIQUENESS_MARGIN_PX,
+    )
     args = parser.parse_args()
 
     nucleus_path = args.nucleus_path.resolve()
@@ -1037,6 +1333,18 @@ def main():
         parser.error("--reference-edge-width-px must be non-negative")
     if not 0 <= args.reference_max_edge_fraction <= 1:
         parser.error("--reference-max-edge-fraction must be in [0, 1]")
+    if args.target_reference_mode == "p_gated_r_autonomous" and reference_channel != "purple":
+        parser.error("p_gated_r_autonomous requires --reference-channel purple")
+    if args.red_harvest_radius_um <= 0:
+        parser.error("--red-harvest-radius-um must be positive")
+    if args.red_min_track_points < 1 or args.red_min_shared_frames < 1:
+        parser.error("red minimum point/shared-frame counts must be positive")
+    if not 0 < args.red_min_movie_coverage_fraction <= 1:
+        parser.error("--red-min-movie-coverage-fraction must be in (0, 1]")
+    if args.red_max_missing_frames < 0:
+        parser.error("--red-max-missing-frames must be non-negative")
+    if args.red_uniqueness_margin_px < 0:
+        parser.error("--red-uniqueness-margin-px must be non-negative")
     target_channels = tuple(channel for channel in CHANNELS if channel != reference_channel)
     reference_prefix = CHANNEL_PREFIX[reference_channel]
     if not nucleus_path.name.endswith('_Nucleus.tif'):
@@ -1263,6 +1571,86 @@ def main():
 
     reference_detection_audit['reference_tracking'] = reference_tracking_audit
     reference_detection_audit['accepted_reference_count'] = len(accepted)
+
+    if args.target_reference_mode == "p_gated_r_autonomous":
+        reference_trajs_dict = {item[0]: item[1] for item in accepted}
+        harvest_radius_px = args.red_harvest_radius_um * PIXEL_SIZE_UM
+        red_candidates, red_detection_rows = build_p_gated_red_candidates(
+            stacks["red"],
+            reference_trajs_dict,
+            nucleus_masks,
+            k=TARGET_TRACKING_K["red"],
+            harvest_radius_px=harvest_radius_px,
+            inter_frame_max_px=_INTER_FRAME_MAX_PX_RED,
+            minimum_points=args.red_min_track_points,
+            maximum_missing_frames=args.red_max_missing_frames,
+        )
+        red_assignments, red_pair_rows, red_pair_frame_rows = pair_red_candidates_to_purple(
+            red_candidates,
+            reference_trajs_dict,
+            maximum_median_distance_px=harvest_radius_px,
+            minimum_shared_frames=args.red_min_shared_frames,
+            movie_frame_count=int(stacks["red"].shape[0]),
+            minimum_movie_coverage_fraction=(
+                args.red_min_movie_coverage_fraction
+            ),
+            uniqueness_margin_px=args.red_uniqueness_margin_px,
+        )
+        for candidate_index, trajectory in enumerate(red_candidates, start=1):
+            save_trajectory_csv(
+                trajectory,
+                out_dir / f"R_candidate{candidate_index:03d}_traj_rela2wholeimg.csv",
+            )
+        for label, trajectory in sorted(red_assignments.items()):
+            save_trajectory_csv(
+                trajectory,
+                out_dir / f"R_loci{label}_traj_rela2wholeimg.csv",
+            )
+        for filename, rows in (
+            ("red_harvest_detections.csv", red_detection_rows),
+            ("red_pair_summary.csv", red_pair_rows),
+            ("red_pair_common_frames.csv", red_pair_frame_rows),
+        ):
+            path = out_dir / filename
+            if rows:
+                with path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                    writer.writeheader()
+                    writer.writerows(rows)
+            else:
+                path.write_text("", encoding="utf-8")
+        reference_detection_audit["red_reference_mode"] = {
+            "mode": args.target_reference_mode,
+            "harvest_radius_um": float(args.red_harvest_radius_um),
+            "inter_frame_max_nm": float(INTER_FRAME_MAX_NM_RED),
+            "continuity": (
+                "red-to-red endpoints only; adjacent frames prioritized; fixed-radius "
+                "short-gap continuation; no interpolation; no P fallback"
+            ),
+            "maximum_missing_frames": int(args.red_max_missing_frames),
+            "minimum_track_points": int(args.red_min_track_points),
+            "pair_metric": "median P-R distance on common frames",
+            "minimum_shared_frames": int(args.red_min_shared_frames),
+            "minimum_movie_coverage_fraction": float(
+                args.red_min_movie_coverage_fraction
+            ),
+            "effective_minimum_shared_frames": int(max(
+                args.red_min_shared_frames,
+                np.ceil(
+                    stacks["red"].shape[0]
+                    * args.red_min_movie_coverage_fraction
+                ),
+            )),
+            "uniqueness_margin_px": float(args.red_uniqueness_margin_px),
+            "red_candidate_count": len(red_candidates),
+            "accepted_pair_count": len(red_assignments),
+            "accepted_p_loci": sorted(red_assignments),
+        }
+        target_channels = tuple(channel for channel in target_channels if channel != "red")
+        print(
+            f"\nP-gated autonomous Red: {len(red_candidates)} retained candidate(s), "
+            f"{len(red_assignments)} unique P-R pair(s); Red removed from legacy target pass"
+        )
     (out_dir / 'reference_detection_audit.json').write_text(
         json.dumps(reference_detection_audit, indent=2), encoding='utf-8'
     )

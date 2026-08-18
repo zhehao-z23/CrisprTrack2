@@ -88,7 +88,7 @@ def spatial_overview(
     output: Path,
     roi_rows: list[dict],
     baseline_rows: list[dict],
-    projection: np.ndarray,
+    projections: dict[str, np.ndarray],
     aligned_mask: np.ndarray,
     pixel_size_nm: float,
     channel_colors: dict[str, str],
@@ -101,7 +101,10 @@ def spatial_overview(
     for row_index, roi_row in enumerate(roi_rows):
         allele = int(roi_row["allele_index"])
         roi = load_mask_2d(Path(roi_row["roi_tiff"]))
-        anchor = read_track_px(Path(roi_row["anchor_csv"]), pixel_size_nm)
+        reference_csv = roi_row.get("reference_csv") or roi_row.get("anchor_csv")
+        reference_channel = roi_row.get("reference_channel", "purple")
+        projection = projections[reference_channel]
+        anchor = read_track_px(Path(reference_csv), pixel_size_nm)
         anchor_frames = np.asarray([point[0] for point in anchor])
         anchor_x = np.asarray([point[1] for point in anchor])
         anchor_y = np.asarray([point[2] for point in anchor])
@@ -114,7 +117,7 @@ def spatial_overview(
             left, anchor_x, anchor_y, anchor_frames, cmap=plt.get_cmap("Greys"),
             linewidth=1.6, linestyle="--"
         )
-        left.set_title(f"Allele {allele}: anchor + static irregular ROI")
+        left.set_title(f"Allele {allele}: {reference_channel} reference + static ROI")
         left.set_xlabel("corrected x (px)")
         left.set_ylabel("corrected y (px)")
 
@@ -278,7 +281,7 @@ def main() -> None:
     }
     spatial_overview(
         outputs["anchor_mask_roi_overview"], roi_rows, baseline_rows,
-        projections[anchor_channel], aligned_mask, pixel_size_nm, channel_colors
+        projections, aligned_mask, pixel_size_nm, channel_colors
     )
     all_candidates_figure(
         outputs["all_candidates_fixed_coordinates"], candidate_rows,

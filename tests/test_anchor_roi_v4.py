@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import math
 import sys
@@ -20,6 +21,12 @@ import align_microsam_mask
 import experiment_profiles
 import max_step_model
 import run_anchor_roi_spt
+
+_AUTO_ROI_PATH = PIPELINE / "auto_roi_for_published_v2.13.py"
+_AUTO_ROI_SPEC = importlib.util.spec_from_file_location("auto_roi_v213", _AUTO_ROI_PATH)
+auto_roi_v213 = importlib.util.module_from_spec(_AUTO_ROI_SPEC)
+assert _AUTO_ROI_SPEC.loader is not None
+_AUTO_ROI_SPEC.loader.exec_module(auto_roi_v213)
 
 
 class MatlabSptTrackRegressionTests(unittest.TestCase):
@@ -247,6 +254,113 @@ class StaticRoiTests(unittest.TestCase):
                 anchor, support, 5, geometry
             )
             self.assertFalse(np.any(roi & ~support))
+
+    def test_validated_hulls_do_not_bridge_gap_or_excessive_step(self):
+        support = np.ones((70, 70), dtype=bool)
+        anchor = [
+            (1, 10.0, 10.0),
+            (2, 12.0, 10.0),
+            (4, 35.0, 35.0),  # frame gap: must start a new segment
+            (5, 55.0, 55.0),  # adjacent but excessive step: another segment
+        ]
+        roi = run_anchor_roi_spt.static_anchor_roi(
+            anchor,
+            support,
+            5,
+            "validated_segment_convex_hull",
+            maximum_reference_step_px=3.0,
+        )
+        self.assertTrue(roi[10, 10])
+        self.assertTrue(roi[35, 35])
+        self.assertTrue(roi[55, 55])
+        self.assertFalse(roi[24, 24])
+        self.assertFalse(roi[45, 45])
+        self.assertEqual(run_anchor_roi_spt.ndimage.label(roi)[1], 3)
+
+
+class PGatedRedReferenceTests(unittest.TestCase):
+    def test_red_continuity_never_falls_back_to_p_position(self):
+        rng = np.random.default_rng(7)
+        stack = rng.normal(100.0, 1.0, size=(3, 48, 48)).astype(np.float32)
+        stack[0, 9:12, 9:13] += 100.0
+        stack[1, 9:12, 10:14] += 100.0
+        stack[2, 29:32, 29:33] += 100.0
+        p_reference = {
+            1: [(0, 10.0, 10.0), (1, 10.0, 11.0), (2, 30.0, 30.0)]
+        }
+        tracks, _audit = auto_roi_v213.build_p_gated_red_candidates(
+            stack,
+            p_reference,
+            [np.ones((48, 48), dtype=bool) for _ in range(3)],
+            k=0.5,
+            harvest_radius_px=5.0,
+            inter_frame_max_px=3.0,
+            minimum_points=1,
+            maximum_missing_frames=3,
+        )
+        self.assertEqual(sorted(len(track) for track in tracks), [1, 2])
+        self.assertFalse(any(len(track) == 3 for track in tracks))
+
+    def test_red_short_gap_uses_red_endpoints_without_interpolation(self):
+        rng = np.random.default_rng(11)
+        stack = rng.normal(100.0, 1.0, size=(3, 48, 48)).astype(np.float32)
+        stack[0, 9:12, 9:13] += 100.0
+        stack[2, 10:13, 11:15] += 100.0
+        p_reference = {
+            1: [(0, 10.0, 10.0), (1, 10.0, 11.0), (2, 11.0, 12.0)]
+        }
+        tracks, _audit = auto_roi_v213.build_p_gated_red_candidates(
+            stack,
+            p_reference,
+            [np.ones((48, 48), dtype=bool) for _ in range(3)],
+            k=0.5,
+            harvest_radius_px=5.0,
+            inter_frame_max_px=3.0,
+            minimum_points=1,
+            maximum_missing_frames=1,
+        )
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual([point[0] for point in tracks[0]], [0, 2])
+
+    def test_pairing_uses_common_frame_median_and_rejects_ambiguity(self):
+        p = {
+            1: [(frame, 10.0, 10.0) for frame in range(5)],
+            2: [(frame, 30.0, 30.0) for frame in range(5)],
+        }
+        red = [
+            [(frame, 10.0, 11.0) for frame in range(5)],
+            [(frame, 30.0, 31.0) for frame in range(5)],
+        ]
+        assignments, rows, _frames = auto_roi_v213.pair_red_candidates_to_purple(
+            red,
+            p,
+            maximum_median_distance_px=25.0,
+            minimum_shared_frames=5,
+            movie_frame_count=5,
+            minimum_movie_coverage_fraction=0.25,
+            uniqueness_margin_px=1.0,
+        )
+        self.assertEqual(sorted(assignments), [1, 2])
+        self.assertTrue(all(row["decision"] == "ACCEPT_UNIQUE" for row in rows))
+        self.assertTrue(all(row["median_distance_px"] == 1.0 for row in rows))
+
+    def test_pairing_rejects_shorter_than_movie_coverage_floor(self):
+        p = {1: [(frame, 10.0, 10.0) for frame in range(20)]}
+        red = [
+            [(frame, 10.0, 10.5) for frame in range(4)],
+            [(frame, 10.0, 12.0) for frame in range(10)],
+        ]
+        assignments, rows, _frames = auto_roi_v213.pair_red_candidates_to_purple(
+            red,
+            p,
+            maximum_median_distance_px=25.0,
+            minimum_shared_frames=5,
+            movie_frame_count=20,
+            minimum_movie_coverage_fraction=0.25,
+            uniqueness_margin_px=1.0,
+        )
+        self.assertEqual(len(assignments[1]), 10)
+        self.assertEqual(rows[0]["minimum_required_common_frames"], 5)
 
 
 class MaskAssociationTests(unittest.TestCase):

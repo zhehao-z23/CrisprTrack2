@@ -27,7 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v5.1.0"
+VERSION = "v5.2.0"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"
@@ -105,13 +105,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-max-edge-fraction", type=float, default=0.10)
     parser.add_argument(
         "--roi-geometry",
-        choices=("tube", "convex_hull"),
-        default="tube",
+        choices=("auto", "tube", "convex_hull", "validated_segment_convex_hull"),
+        default="auto",
         help=(
             "Static anchor ROI geometry. Tube preserves the v4.2.1 behavior; "
             "convex_hull writes to an isolated result directory."
         ),
     )
+    parser.add_argument(
+        "--target-reference-mode",
+        choices=("auto", "legacy", "p_gated_r_autonomous"),
+        default="auto",
+        help="auto selects the v5.2 P-gated autonomous Red mode for DSB only.",
+    )
+    parser.add_argument("--red-harvest-radius-um", type=float, default=2.5)
+    parser.add_argument("--red-min-track-points", type=int, default=5)
+    parser.add_argument("--red-min-shared-frames", type=int, default=5)
+    parser.add_argument("--red-min-movie-coverage-fraction", type=float, default=0.25)
+    parser.add_argument("--red-max-missing-frames", type=int, default=1)
+    parser.add_argument("--red-uniqueness-margin-px", type=float, default=1.0)
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)
@@ -154,7 +166,17 @@ def main() -> None:
     profile = experiment_profiles.get_profile(args.experiment_profile)
     profile_validation = profile.validate_crop(crop_tiff)
     anchor_channel = profile.anchor_channel
-    geometry_suffix = "" if args.roi_geometry == "tube" else "_convex_hull"
+    is_dsb = profile.name == "dsb_53bp1_site1_site2"
+    if args.target_reference_mode == "auto":
+        args.target_reference_mode = "p_gated_r_autonomous" if is_dsb else "legacy"
+    if args.roi_geometry == "auto":
+        args.roi_geometry = "validated_segment_convex_hull" if is_dsb else "tube"
+    if args.target_reference_mode == "p_gated_r_autonomous" and not is_dsb:
+        raise ValueError("p_gated_r_autonomous is defined only for the DSB profile")
+    if args.target_reference_mode == "p_gated_r_autonomous":
+        geometry_suffix = "_p_gated_r_autonomous_" + args.roi_geometry
+    else:
+        geometry_suffix = "" if args.roi_geometry == "tube" else f"_{args.roi_geometry}"
     results_dir = analysis_dir / (
         f"anchor_roi_v4_{profile.name}{geometry_suffix}"
     )
@@ -241,6 +263,20 @@ def main() -> None:
                 str(args.reference_edge_width_px),
                 "--reference-max-edge-fraction",
                 str(args.reference_max_edge_fraction),
+                "--target-reference-mode",
+                args.target_reference_mode,
+                "--red-harvest-radius-um",
+                str(args.red_harvest_radius_um),
+                "--red-min-track-points",
+                str(args.red_min_track_points),
+                "--red-min-shared-frames",
+                str(args.red_min_shared_frames),
+                "--red-min-movie-coverage-fraction",
+                str(args.red_min_movie_coverage_fraction),
+                "--red-max-missing-frames",
+                str(args.red_max_missing_frames),
+                "--red-uniqueness-margin-px",
+                str(args.red_uniqueness_margin_px),
             ]
             if args.reference_seed_k is not None:
                 stage1_command.extend(["--reference-seed-k", str(args.reference_seed_k)])
@@ -262,6 +298,12 @@ def main() -> None:
                 profile.name,
                 "--roi-geometry",
                 args.roi_geometry,
+                "--channel-specific-reference-mode",
+                (
+                    "p_r_specific"
+                    if args.target_reference_mode == "p_gated_r_autonomous"
+                    else "legacy"
+                ),
                 "--roi-dilation-px",
                 str(args.roi_dilation_px),
                 "--matlab-bin",
@@ -289,6 +331,7 @@ def main() -> None:
 
             run([sys.executable, str(PYTHON_QC), str(analysis_dir), "--results-dir", str(results_dir)])
             matlab_output = results_dir / "figures" / "matlab_longest"
+            matlab_output.mkdir(parents=True, exist_ok=True)
             matlab_expression = (
                 f"addpath('{matlab_quote(PIPELINE)}','-begin'); "
                 f"plot_longest_trajectories('{matlab_quote(results_dir / 'baseline_longest' / 'baseline_manifest.csv')}', "

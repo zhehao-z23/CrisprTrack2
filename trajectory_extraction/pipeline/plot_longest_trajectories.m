@@ -73,7 +73,24 @@ for rowIndex = 1:height(manifest)
         frameInterval, allele, marker, height(trajectory));
     svgPath = fullfile(outputDir, baseName + ".svg");
     set(svgFigure, 'PaperPositionMode', 'auto');
-    print(svgFigure, char(svgPath), '-dsvg', '-painters');
+    try
+        print(svgFigure, char(svgPath), '-dsvg', '-painters');
+    catch directExportError
+        % Windows' legacy SVG printer can reject otherwise valid long paths.
+        % Retry through a short temporary path; PNG export above remains the
+        % required QC output even if the optional vector copy is unavailable.
+        temporarySvg = string(tempname) + ".svg";
+        try
+            print(svgFigure, char(temporarySvg), '-dsvg', '-painters');
+            movefile(temporarySvg, svgPath, 'f');
+        catch fallbackExportError
+            if isfile(temporarySvg)
+                delete(temporarySvg);
+            end
+            warning('Optional SVG export skipped (%s; fallback: %s)', ...
+                directExportError.message, fallbackExportError.message);
+        end
+    end
     if isgraphics(svgFigure)
         close(svgFigure);
     end

@@ -1,5 +1,29 @@
 # Changelog
 
+## 5.2.0 — 2026-08-18
+
+- Add a DSB-only P-gated, Red-autonomous reference path. Purple defines a
+  2.5-um per-frame harvest domain and canonical allele identities; Red
+  detections link only to Red detections within the fixed 750-nm reference
+  limit. Adjacent frames have priority and at most one missing frame is
+  tolerated; there is no Purple-position fallback or interpolation.
+- Pair Red candidates to Purple identities by median P-R distance on at least
+  five common frames and at least 25% of all movie frames. Accept only
+  reciprocal one-to-one matches with at least a 1-px bilateral alternative
+  margin; ambiguous loci fail closed without a Red SPT run.
+- Use channel-specific DSB ROIs: Green/Purple use the Purple reference, while
+  Red uses its uniquely paired autonomous Red reference.
+- Add `validated_segment_convex_hull`: split a reference at a non-adjacent
+  frame or excessive channel-fixed step, fill a convex hull independently for
+  each legal segment, union the segment hulls, dilate by 5 px, and intersect
+  with the aligned 0-px micro-SAM support. Disconnected segment unions are
+  retained and audited rather than bridged.
+- Make the new reference/ROI policy the `auto` default only for the DSB
+  profile; retain the legacy target-reference and tube defaults for Chr3.
+- Add full detection, common-frame pairing, ROI-transition and coordinate
+  audits, a reusable 16-case reference/ROI validation utility, synthetic
+  no-fallback/no-bridge tests, and robust long-path MATLAB QC export.
+
 ## 5.1.0 — 2026-08-05
 
 - Set drift-aligned micro-SAM mask expansion to 0 px by default; keep the

@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v5.1.0"
+VERSION = "v5.2.0"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 
@@ -56,6 +56,11 @@ def scientific_options(args: argparse.Namespace) -> dict:
         "reference_edge_width_px": args.reference_edge_width_px,
         "reference_max_edge_fraction": args.reference_max_edge_fraction,
         "roi_geometry": args.roi_geometry,
+        "target_reference_mode": args.target_reference_mode,
+        "red_harvest_radius_um": args.red_harvest_radius_um,
+        "red_min_track_points": args.red_min_track_points,
+        "red_min_shared_frames": args.red_min_shared_frames,
+        "red_uniqueness_margin_px": args.red_uniqueness_margin_px,
         "roi_dilation_px": args.roi_dilation_px,
         "d_star": args.d_star,
         "alpha": args.alpha,
@@ -68,8 +73,14 @@ def scientific_options(args: argparse.Namespace) -> dict:
     }
 
 
+def result_suffix(args: argparse.Namespace) -> str:
+    if args.target_reference_mode == "p_gated_r_autonomous":
+        return "_p_gated_r_autonomous_" + args.roi_geometry
+    return "" if args.roi_geometry == "tube" else f"_{args.roi_geometry}"
+
+
 def completion_matches(analysis_dir: Path, args: argparse.Namespace) -> bool:
-    geometry_suffix = "" if args.roi_geometry == "tube" else "_convex_hull"
+    geometry_suffix = result_suffix(args)
     path = (
         analysis_dir
         / f"anchor_roi_v4_{args.experiment_profile}{geometry_suffix}"
@@ -89,7 +100,7 @@ def completion_matches(analysis_dir: Path, args: argparse.Namespace) -> bool:
 
 
 def tail_log(analysis_dir: Path, args: argparse.Namespace, line_count: int = 25) -> str:
-    geometry_suffix = "" if args.roi_geometry == "tube" else "_convex_hull"
+    geometry_suffix = result_suffix(args)
     path = (
         analysis_dir
         / f"anchor_roi_v4_{args.experiment_profile}{geometry_suffix}"
@@ -120,6 +131,13 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         "--reference-edge-width-px", str(args.reference_edge_width_px),
         "--reference-max-edge-fraction", str(args.reference_max_edge_fraction),
         "--roi-geometry", args.roi_geometry,
+        "--target-reference-mode", args.target_reference_mode,
+        "--red-harvest-radius-um", str(args.red_harvest_radius_um),
+        "--red-min-track-points", str(args.red_min_track_points),
+        "--red-min-shared-frames", str(args.red_min_shared_frames),
+        "--red-min-movie-coverage-fraction", str(args.red_min_movie_coverage_fraction),
+        "--red-max-missing-frames", str(args.red_max_missing_frames),
+        "--red-uniqueness-margin-px", str(args.red_uniqueness_margin_px),
         "--roi-dilation-px", str(args.roi_dilation_px),
         "--d-star", str(args.d_star),
         "--alpha", str(args.alpha),
@@ -190,9 +208,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-max-edge-fraction", type=float, default=0.10)
     parser.add_argument(
         "--roi-geometry",
-        choices=("tube", "convex_hull"),
-        default="tube",
+        choices=("auto", "tube", "convex_hull", "validated_segment_convex_hull"),
+        default="auto",
     )
+    parser.add_argument(
+        "--target-reference-mode",
+        choices=("auto", "legacy", "p_gated_r_autonomous"),
+        default="auto",
+    )
+    parser.add_argument("--red-harvest-radius-um", type=float, default=2.5)
+    parser.add_argument("--red-min-track-points", type=int, default=5)
+    parser.add_argument("--red-min-shared-frames", type=int, default=5)
+    parser.add_argument("--red-min-movie-coverage-fraction", type=float, default=0.25)
+    parser.add_argument("--red-max-missing-frames", type=int, default=1)
+    parser.add_argument("--red-uniqueness-margin-px", type=float, default=1.0)
     parser.add_argument("--roi-dilation-px", type=int, default=5)
     parser.add_argument("--d-star", type=float, default=4.1e-3)
     parser.add_argument("--alpha", type=float, default=0.38)
@@ -208,6 +237,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     profile = experiment_profiles.get_profile(args.experiment_profile)
+    is_dsb = profile.name == "dsb_53bp1_site1_site2"
+    if args.target_reference_mode == "auto":
+        args.target_reference_mode = "p_gated_r_autonomous" if is_dsb else "legacy"
+    if args.roi_geometry == "auto":
+        args.roi_geometry = "validated_segment_convex_hull" if is_dsb else "tube"
+    if args.target_reference_mode == "p_gated_r_autonomous" and not is_dsb:
+        raise SystemExit("ERROR: p_gated_r_autonomous is defined only for the DSB profile")
     crop_dir = args.crop_dir.resolve()
     if not crop_dir.is_dir() or args.cell_workers < 1:
         raise SystemExit("ERROR: crop_dir must exist and --cell-workers must be >= 1")

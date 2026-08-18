@@ -32,13 +32,14 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v5.1.0"
+VERSION = "v5.2.0"
 HERE = Path(__file__).resolve().parent
 MATLAB_DEPS = HERE / "matlab_deps"
 CHANNELS = ("green", "red", "purple")
 PREFIX = {"green": "G", "red": "R", "purple": "P"}
 GAUSSIAN_FIT_BOX_SIZE_PX = 9
 MIN_ROI_DILATION_PX = math.ceil(GAUSSIAN_FIT_BOX_SIZE_PX / 2)
+REFERENCE_CONTINUITY_NM = {"purple": 500.0, "red": 750.0}
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -104,6 +105,7 @@ def static_anchor_roi(
     nucleus_support_2d: np.ndarray,
     dilation_px: int,
     geometry: str = "tube",
+    maximum_reference_step_px: float | None = None,
 ) -> np.ndarray:
     """Build one static ROI from the complete anchor path."""
     if dilation_px < MIN_ROI_DILATION_PX:
@@ -111,14 +113,27 @@ def static_anchor_roi(
             f"ROI dilation must be >= {MIN_ROI_DILATION_PX} px so the "
             f"{GAUSSIAN_FIT_BOX_SIZE_PX}px-wide Gaussian fit box is not under-supported"
         )
-    if geometry not in {"tube", "convex_hull"}:
+    if geometry not in {"tube", "convex_hull", "validated_segment_convex_hull"}:
         raise ValueError(f"Unknown ROI geometry: {geometry}")
+    if geometry == "validated_segment_convex_hull" and (
+        maximum_reference_step_px is None or maximum_reference_step_px <= 0
+    ):
+        raise ValueError(
+            "validated_segment_convex_hull requires a positive maximum_reference_step_px"
+        )
     centerline = np.zeros_like(nucleus_support_2d, dtype=bool)
-    points = [(int(round(y)), int(round(x))) for _frame, x, y in anchor]
+    ordered = sorted(anchor)
+    points = [(int(round(y)), int(round(x))) for _frame, x, y in ordered]
     for y, x in points:
         if 0 <= y < centerline.shape[0] and 0 <= x < centerline.shape[1]:
             centerline[y, x] = True
-    for (y0, x0), (y1, x1) in zip(points[:-1], points[1:]):
+    for index, ((y0, x0), (y1, x1)) in enumerate(zip(points[:-1], points[1:])):
+        if geometry == "validated_segment_convex_hull":
+            frame0, x0_float, y0_float = ordered[index]
+            frame1, x1_float, y1_float = ordered[index + 1]
+            step = float(np.hypot(x1_float - x0_float, y1_float - y0_float))
+            if frame1 - frame0 != 1 or step > maximum_reference_step_px:
+                continue
         rows, columns = line(y0, x0, y1, x1)
         valid = (
             (rows >= 0)
@@ -127,11 +142,39 @@ def static_anchor_roi(
             & (columns < centerline.shape[1])
         )
         centerline[rows[valid], columns[valid]] = True
-    roi_seed = (
-        centerline
-        if geometry == "tube"
-        else convex_hull_image(centerline)
-    )
+    if geometry == "tube":
+        roi_seed = centerline
+    elif geometry == "convex_hull":
+        roi_seed = convex_hull_image(centerline)
+    else:
+        roi_seed = np.zeros_like(centerline)
+        segment_start = 0
+        for index in range(len(ordered)):
+            is_end = index == len(ordered) - 1
+            if not is_end:
+                frame0, x0, y0 = ordered[index]
+                frame1, x1, y1 = ordered[index + 1]
+                step = float(np.hypot(x1 - x0, y1 - y0))
+                is_end = frame1 - frame0 != 1 or step > maximum_reference_step_px
+            if not is_end:
+                continue
+            segment_mask = np.zeros_like(centerline)
+            segment = ordered[segment_start:index + 1]
+            segment_points = [
+                (int(round(y)), int(round(x))) for _frame, x, y in segment
+            ]
+            for y, x in segment_points:
+                if 0 <= y < segment_mask.shape[0] and 0 <= x < segment_mask.shape[1]:
+                    segment_mask[y, x] = True
+            for (y0, x0), (y1, x1) in zip(segment_points[:-1], segment_points[1:]):
+                rows, columns = line(y0, x0, y1, x1)
+                valid = (
+                    (rows >= 0) & (rows < segment_mask.shape[0])
+                    & (columns >= 0) & (columns < segment_mask.shape[1])
+                )
+                segment_mask[rows[valid], columns[valid]] = True
+            roi_seed |= convex_hull_image(segment_mask)
+            segment_start = index + 1
     return ndimage.binary_dilation(
         roi_seed, iterations=dilation_px
     ) & nucleus_support_2d
@@ -151,9 +194,9 @@ def static_anchor_union(
     )
 
 
-def partition_channels(worker_count: int) -> list[list[str]]:
-    groups = [[] for _ in range(min(worker_count, len(CHANNELS)))]
-    for index, channel in enumerate(CHANNELS):
+def partition_channels(worker_count: int, channels: tuple[str, ...] = CHANNELS) -> list[list[str]]:
+    groups = [[] for _ in range(min(worker_count, len(channels)))]
+    for index, channel in enumerate(channels):
         groups[index % len(groups)].append(channel)
     return groups
 
@@ -214,9 +257,10 @@ def run_locus_spt(
     save_filter_images: bool,
     max_step_px: float,
     log_path: Path,
+    channels: tuple[str, ...] = CHANNELS,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    groups = partition_channels(matlab_workers)
+    groups = partition_channels(matlab_workers, channels)
     common = {
         "tiffs": tiffs,
         "roi_path": roi_path,
@@ -452,12 +496,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--roi-geometry",
-        choices=("tube", "convex_hull"),
+        choices=("tube", "convex_hull", "validated_segment_convex_hull"),
         default="tube",
         help=(
             "Static ROI seed: the temporally ordered anchor-path tube "
             "(backward-compatible default), or the filled convex hull of "
             "that path. Both are dilated and intersected with micro-SAM support."
+        ),
+    )
+    parser.add_argument(
+        "--channel-specific-reference-mode",
+        choices=("legacy", "p_r_specific"),
+        default="legacy",
+        help=(
+            "p_r_specific uses P reference/ROI for Green+Purple and the uniquely "
+            "paired autonomous R reference/ROI for Red."
         ),
     )
     parser.add_argument("--roi-dilation-px", type=int, default=5)
@@ -550,65 +603,105 @@ def main() -> None:
     if not anchor_paths:
         raise RuntimeError(f"No {prefix} anchor trajectories found in {anchor_dir}")
 
+    channel_specific = args.channel_specific_reference_mode == "p_r_specific"
+    if channel_specific and profile.name != "dsb_53bp1_site1_site2":
+        raise ValueError("p_r_specific is defined only for the DSB experiment profile")
+
     candidate_rows = []
     roi_rows = []
-    for allele_index, anchor_path in enumerate(anchor_paths, start=1):
-        anchor_locus = locus_number(anchor_path)
-        anchor = read_track_px(anchor_path, pixel_size_nm)
+    allele_anchors = []
+
+    def build_record_and_run(
+        *,
+        allele_index: int,
+        anchor_locus: int,
+        reference_path: Path,
+        reference_channel: str,
+        channels: tuple[str, ...],
+    ) -> None:
+        reference = read_track_px(reference_path, pixel_size_nm)
+        reference_step_px = REFERENCE_CONTINUITY_NM.get(
+            reference_channel, 500.0
+        ) / pixel_size_nm
         roi = static_anchor_roi(
-            anchor,
+            reference,
             aligned_mask[0],
             args.roi_dilation_px,
             args.roi_geometry,
+            maximum_reference_step_px=reference_step_px,
         )
+        if not roi.any():
+            raise RuntimeError(
+                f"Allele {allele_index}/loci{anchor_locus}/{reference_channel} ROI is empty"
+            )
         components = int(ndimage.label(roi)[1])
-        if components != 1:
+        if components != 1 and args.roi_geometry != "validated_segment_convex_hull":
             raise RuntimeError(
                 f"Allele {allele_index}/loci{anchor_locus} ROI has {components} components"
             )
-        roi_label = "roi" if args.roi_geometry == "tube" else "convex_hull"
+        roi_label = {
+            "tube": "roi",
+            "convex_hull": "convex_hull",
+            "validated_segment_convex_hull": "validated_segment_convex_hull",
+        }[args.roi_geometry]
         roi_path = roi_dir / (
-            f"allele_{allele_index:03d}_loci{anchor_locus}_"
+            f"allele_{allele_index:03d}_loci{anchor_locus}_{reference_channel}_"
             f"static_anchor_{roi_label}.tif"
         )
         tifffile.imwrite(roi_path, roi.astype(np.uint8) * 255)
         rows, columns = np.where(roi)
-        roi_rows.append(
+        ordered = sorted(reference)
+        transitions = [
             {
-                "allele_index": allele_index,
-                "anchor_locus": anchor_locus,
-                "experiment_profile": profile.name,
-                "anchor_channel": anchor_channel,
-                "anchor_raw_channel_index": profile.anchor.raw_index,
-                "anchor_marker": profile.anchor.marker,
-                "anchor_site_id": profile.anchor.site_id,
-                "anchor_genomic_locus": profile.anchor.genomic_locus,
-                "anchor_fluorophore": profile.anchor.fluorophore,
-                "anchor_csv": str(anchor_path.resolve()),
-                "anchor_points": len(anchor),
-                "roi_geometry": args.roi_geometry,
-                "roi_dilation_px": args.roi_dilation_px,
-                "gaussian_fit_box_size_px": GAUSSIAN_FIT_BOX_SIZE_PX,
-                "nucleus_support": "frame 1 of drift-aligned micro-SAM mask (mask dilation is independently audited)",
-                "roi_area_px": int(roi.sum()),
-                "connected_components": components,
-                "bbox_top": int(rows.min()),
-                "bbox_left": int(columns.min()),
-                "bbox_bottom_exclusive": int(rows.max() + 1),
-                "bbox_right_exclusive": int(columns.max() + 1),
-                "roi_tiff": str(roi_path.resolve()),
+                "frame_delta": int(second[0] - first[0]),
+                "step_px": float(np.hypot(second[1] - first[1], second[2] - first[2])),
             }
-        )
+            for first, second in zip(ordered[:-1], ordered[1:])
+        ]
+        roi_rows.append({
+            "allele_index": allele_index,
+            "anchor_locus": anchor_locus,
+            "experiment_profile": profile.name,
+            "reference_channel": reference_channel,
+            "spt_channels": ",".join(channels),
+            "reference_csv": str(reference_path.resolve()),
+            "reference_points": len(reference),
+            "reference_maximum_legal_step_px": reference_step_px,
+            "legal_adjacent_transitions": sum(
+                row["frame_delta"] == 1 and row["step_px"] <= reference_step_px
+                for row in transitions
+            ),
+            "rejected_gap_transitions": sum(row["frame_delta"] != 1 for row in transitions),
+            "rejected_step_transitions": sum(
+                row["frame_delta"] == 1 and row["step_px"] > reference_step_px
+                for row in transitions
+            ),
+            "roi_geometry": args.roi_geometry,
+            "roi_dilation_px": args.roi_dilation_px,
+            "gaussian_fit_box_size_px": GAUSSIAN_FIT_BOX_SIZE_PX,
+            "nucleus_support": "frame 1 of drift-aligned micro-SAM mask (mask dilation independently audited)",
+            "roi_area_px": int(roi.sum()),
+            "connected_components": components,
+            "bbox_top": int(rows.min()),
+            "bbox_left": int(columns.min()),
+            "bbox_bottom_exclusive": int(rows.max() + 1),
+            "bbox_right_exclusive": int(columns.max() + 1),
+            "roi_tiff": str(roi_path.resolve()),
+        })
 
-        locus_output = spt_dir / f"allele_{allele_index:03d}_loci{anchor_locus}"
+        locus_output = (
+            spt_dir / f"allele_{allele_index:03d}_loci{anchor_locus}" / reference_channel
+        )
         matlab_output = locus_output / "matlab_result"
         print(
-            f"Allele {allele_index} (anchor loci{anchor_locus}): ROI={int(roi.sum())} px; "
+            f"Allele {allele_index} loci{anchor_locus} {reference_channel}-reference: "
+            f"channels={channels}, ROI={int(roi.sum())} px, components={components}; "
             f"SPT max_step={max_step_px:.3f} px",
             flush=True,
         )
+        selected_tiffs = {channel: tiffs[channel] for channel in channels}
         run_locus_spt(
-            tiffs=tiffs,
+            tiffs=selected_tiffs,
             roi_path=roi_path,
             frame_rate=metadata["frame_rate_hz"],
             pixel_um=metadata["pixel_size_x_um_per_px"],
@@ -618,24 +711,53 @@ def main() -> None:
             save_filter_images=args.matlab_save_filter_images,
             max_step_px=max_step_px,
             log_path=locus_output / "matlab_spt.log",
+            channels=channels,
         )
-        candidates = export_candidates(tiffs, matlab_output)
-        for path in candidates:
-            candidate_rows.append(
-                candidate_audit(
-                    path,
+        for path in export_candidates(selected_tiffs, matlab_output):
+            candidate_rows.append(candidate_audit(
+                path,
+                allele_index=allele_index,
+                anchor_locus=anchor_locus,
+                channel=path.name[0],
+                roi=roi,
+                pixel_size_nm=pixel_size_nm,
+                profile=profile,
+            ))
+
+    for allele_index, anchor_path in enumerate(anchor_paths, start=1):
+        anchor_locus = locus_number(anchor_path)
+        allele_anchors.append((allele_index, anchor_locus))
+        if channel_specific:
+            build_record_and_run(
+                allele_index=allele_index,
+                anchor_locus=anchor_locus,
+                reference_path=anchor_path,
+                reference_channel="purple",
+                channels=("green", "purple"),
+            )
+            red_reference = anchor_dir / f"R_loci{anchor_locus}_traj_rela2wholeimg.csv"
+            if red_reference.is_file():
+                build_record_and_run(
                     allele_index=allele_index,
                     anchor_locus=anchor_locus,
-                    channel=path.name[0],
-                    roi=roi,
-                    pixel_size_nm=pixel_size_nm,
-                    profile=profile,
+                    reference_path=red_reference,
+                    reference_channel="red",
+                    channels=("red",),
                 )
+            else:
+                print(
+                    f"Allele {allele_index} loci{anchor_locus}: no uniquely paired autonomous "
+                    "Red reference; Red SPT skipped fail-closed",
+                    flush=True,
+                )
+        else:
+            build_record_and_run(
+                allele_index=allele_index,
+                anchor_locus=anchor_locus,
+                reference_path=anchor_path,
+                reference_channel=anchor_channel,
+                channels=CHANNELS,
             )
-
-    allele_anchors = [
-        (row["allele_index"], row["anchor_locus"]) for row in roi_rows
-    ]
     selected_rows, selection_audit = select_longest_baselines(
         candidate_rows, baseline_dir, allele_anchors, profile
     )
@@ -659,14 +781,18 @@ def main() -> None:
         "anchor_marker": profile.anchor.marker,
         "anchor_count": len(anchor_paths),
         "roi_geometry": args.roi_geometry,
-        "static_roi_rule": (
-            "complete temporally ordered anchor path used as a centerline"
-            if args.roi_geometry == "tube"
-            else "filled convex hull of the complete temporally ordered anchor path"
-        )
+        "static_roi_rule": {
+            "tube": "complete temporally ordered anchor path used as a centerline",
+            "convex_hull": "filled global convex hull of the complete anchor path",
+            "validated_segment_convex_hull": (
+                "split at non-adjacent frames or channel-fixed excessive steps; "
+                "filled convex hull per legal adjacent-frame segment; union segments"
+            ),
+        }[args.roi_geometry]
         + ", dilated, intersected with frame-1 aligned micro-SAM support, reused for every frame",
         "roi_dilation_px": args.roi_dilation_px,
-        "candidate_matching_to_reference_used": False,
+        "channel_specific_reference_mode": args.channel_specific_reference_mode,
+        "candidate_matching_to_reference_used": channel_specific,
         "baseline_rule": "longest candidate independently within each allele/channel; no cleaned/manual input",
         "candidate_count": len(candidate_rows),
         "selected_baseline_count": len(selected_rows),

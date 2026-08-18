@@ -5,13 +5,18 @@ Automated, profile-locked trajectory extraction and single-particle tracking
 single-cell, multi-channel TIFF plus its acquisition sidecar and exact
 micro-SAM mask into audited 2-D Gaussian trajectories for the G/R/P channels.
 
-The current code version is **`v5.1.0`**. The production
+The current code version is **`v5.2.0`**. The production
 entry points are still named `run_full_pipeline_v4.py` and
 `run_batch_pipeline_v4.py`, and result directories still begin with
 `anchor_roi_v4_`. Those names and the output layout are intentionally retained
 for compatibility; runtime manifests identify the run as v5.
 
-v5.1 retains the v5 dev1 global-gap rule and fixes the reviewed mask,
+v5.2 retains the v5.1 global-gap, mask, `max_disp`, reference and coordinate
+contracts. For the DSB profile only, its default additionally uses a P-gated,
+Red-autonomous reference and channel-specific P/R ROIs. See
+[`../docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md`](../docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md).
+
+v5.1 fixed the reviewed mask,
 reference, movie-level `max_disp`, and coordinate policies. See
 [`../docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md`](../docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md)
 for the complete derivation and end-to-end review contract.
@@ -333,7 +338,14 @@ trajectory_batch_v4_<experiment_profile>_summary.csv
 | `--reference-tracking-k` | profile default | DSB Purple uses `0.5` for per-frame tracking. |
 | `--reference-edge-width-px` | `3` | Inner consensus-mask boundary band. |
 | `--reference-max-edge-fraction` | `0.10` | Maximum component fraction in the boundary band. |
-| `--roi-geometry` | `tube` | Ordered anchor-path tube, or `convex_hull`. |
+| `--target-reference-mode` | `auto` | DSB resolves to `p_gated_r_autonomous`; Chr3 resolves to `legacy`. |
+| `--red-harvest-radius-um` | `2.5` | DSB per-frame Red candidate harvest radius around observed P positions. |
+| `--red-min-track-points` | `5` | Minimum independently linked Red reference-candidate points. |
+| `--red-min-shared-frames` | `5` | Minimum common P/R frames for identity pairing. |
+| `--red-min-movie-coverage-fraction` | `0.25` | Pairing also requires common-frame support in at least 25% of all movie frames. |
+| `--red-max-missing-frames` | `1` | Red-only continuity may cross one missing detection; no position is interpolated. |
+| `--red-uniqueness-margin-px` | `1` | Required bilateral next-best distance margin. |
+| `--roi-geometry` | `auto` | DSB resolves to `validated_segment_convex_hull`; Chr3 resolves to `tube`. |
 | `--roi-dilation-px` | `5` | Static ROI expansion. Production requires at least 5 px. |
 | `--d-star` | `0.0041` | Anomalous diffusion prior in µm²/s^alpha. |
 | `--alpha` | `0.38` | Anomalous diffusion exponent. |
@@ -372,6 +384,7 @@ not free-form production CLI parameters.
 | `INTER_FRAME_MAX_NM` | `500` nm | Purple reference-track displacement limit. |
 | `INTER_FRAME_MAX_NM_RED` | `750` nm | Red reference-track displacement limit. |
 | `REFERENCE_PROX_MAX_UM` | `3.0` µm | Maximum target-reference proximity. |
+| `DSB_RED_HARVEST_RADIUS_UM` | `2.5` µm | DSB Red harvest support; not a biological-state cutoff. |
 | `SEED_MAX_FRAME` | `5` | Early frames searched for a target-channel seed. |
 | `MAX_BLOB_PX` | `120` px | Area above which an overlap-group blob is re-examined. |
 | `_ADAPTIVE_K_STEPS` | `[1.0, 1.5, 2.0]` | Progressive local thresholds for splitting a merged blob. |
@@ -387,6 +400,14 @@ centerline. For `convex_hull`, its concavities are filled first. Both are
 dilated by `roi-dilation-px`, intersected with frame 1 of the drift-aligned
 micro-SAM support, required to remain connected, and then reused unchanged for
 all movie frames.
+
+For `validated_segment_convex_hull`, consecutive reference observations remain
+in one segment only when `delta frame = 1` and the step is no larger than the
+fixed reference limit (Purple 500 nm; Red 750 nm). A convex hull is filled
+separately for every segment. Segment hulls are unioned, dilated by 5 px and
+intersected with frame 1 of the aligned 0-px micro-SAM mask. No geometry can
+bridge a missing frame or excessive step; multiple audited ROI components are
+therefore allowed.
 
 Peak centers are admitted only inside this ROI. Pixels outside it are not
 zeroed before Gaussian fitting, so a near-edge peak retains its full fitting
@@ -567,16 +588,22 @@ RGB segments to avoid black trajectories during vector export.
    historical `green`, `red`, and `purple` filenames.
 3. The exact saved micro-SAM instance mask is resolved from the sidecar. It is
    registered independently to every corrected frame by phase correlation,
-   dilated by 5 px by default, and audited. The production path does not replace
+   not expanded (`0 px`) by default, and audited. The production path does not replace
    it with an intensity/Otsu boundary.
 4. The profile chooses the anchor automatically. Stage 1 detects candidate
    anchor loci from the time-averaged anchor image, follows them through time,
    and rejects an anchor when more than 10% of checkable positions lie outside
    the aligned support.
-5. For each accepted anchor, its complete time-ordered path becomes either a
-   tube centerline or filled convex hull. The geometry is dilated, intersected
-   with frame 1 of the aligned/dilated support, required to remain connected,
-   and reused unchanged for all frames.
+5. In DSB v5.2, P positions harvest Red components within 2.5 um. Harvested
+   Red components link only by Red-to-Red endpoint continuity within 750 nm.
+   Adjacent frames are matched first; one missing frame is permitted, but no
+   coordinate is interpolated and P is never a fallback position.
+6. Red candidates and P identities are paired by common-frame median distance;
+   at least five common frames, at least 25% total-movie support, reciprocal
+   best assignment and a bilateral 1-px next-best margin are required.
+   Ambiguous/missing Red identities fail closed.
+7. P references define the Green/Purple ROI; a uniquely paired Red reference
+   defines the Red ROI. Both use the same validated-segment convex-hull +5 rule.
 
 ### Stage 2 — ROI-restricted MATLAB SPT and v5 linking
 

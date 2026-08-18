@@ -5,13 +5,20 @@ Oligo-LiveFISH chromatin-dynamics data. It provides a workflow for turning
 multi-channel microscopy movies into audited single-particle DNA trajectories,
 then using those trajectories to model nuclear and local chromatin features.
 
-This snapshot is **v5.1.0**. It retains the v5 dev1 gap-memory change and fixes
-the final production analysis strategy: zero micro-SAM mask expansion,
+This snapshot is **v5.2.0**. It retains the v5.1 mask, max-disp, reference and
+coordinate contracts and adds a DSB-specific channel-decoupled strategy:
+Purple supplies canonical allele identities and a 2.5-um Red harvest domain,
+Red reference tracks are built only by Red continuity with at most one missing
+frame, identity pairing requires at least 25% movie support and uses
+common-frame median P-R distance, and P/R ROIs use per-valid-segment convex
+hulls plus 5 px. The v5.1 foundations remain: zero micro-SAM mask expansion,
 movie-level 97.5% trajectory-coverage calibration of one fixed `max_disp`,
 fully contained and edge-filtered reference components, separate reference
 seed/tracking thresholds, and a shared pixel-centre coordinate contract. The
 complete review contract is documented in
 [`docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md`](docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md).
+The v5.2 DSB delta is documented in
+[`docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md`](docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md).
 
 The clean v4.2.2 ancestor is commit
 `833515ee7a3da2ced4b34925c85107d54c006918`; the separately reproducible v5
@@ -54,7 +61,7 @@ trajectory_extraction/
   run_full_pipeline_v4.py        # v5 single-cell runner; compatibility filename
   run_batch_pipeline_v4.py       # v5 batch runner; compatibility filename
   pipeline/                      # Python modules and bundled MATLAB dependencies
-  README.md                      # complete CrisprTrack v5.1 contract and usage
+  README.md                      # complete CrisprTrack v5.2 contract and usage
 
 Cellular_feature_extraction/
   extract_features.py

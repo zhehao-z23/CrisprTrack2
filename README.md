@@ -5,7 +5,7 @@ Oligo-LiveFISH chromatin-dynamics data. It provides a workflow for turning
 multi-channel microscopy movies into audited single-particle DNA trajectories,
 then using those trajectories to model nuclear and local chromatin features.
 
-This snapshot is **v5.2.0**. It retains the v5.1 mask, max-disp, reference and
+This snapshot is **v5.2.1**. It retains the v5.1 mask, max-disp, reference and
 coordinate contracts and adds a DSB-specific channel-decoupled strategy:
 Purple supplies canonical allele identities and a 2.5-um Red harvest domain,
 Red reference tracks are built only by Red continuity with at most one missing
@@ -14,8 +14,13 @@ common-frame median P-R distance, and P/R ROIs use per-valid-segment convex
 hulls plus 5 px. The v5.1 foundations remain: zero micro-SAM mask expansion,
 movie-level 97.5% trajectory-coverage calibration of one fixed `max_disp`,
 fully contained and edge-filtered reference components, separate reference
-seed/tracking thresholds, and a shared pixel-centre coordinate contract. The
-complete review contract is documented in
+seed/tracking thresholds, and a shared pixel-centre coordinate contract.
+The v5.2.1 DSB batch runner additionally exports measurement-only per-frame
+53BP1 component lineages, continuous Site2-centred intensity, and bounded
+distance scores. This sidecar stage does not change candidate QC,
+reference/ROI/SPT, or baseline selection. Its contract is documented in
+[`docs/V5_2_1_53BP1_BATCH_INTEGRATION_CN.md`](docs/V5_2_1_53BP1_BATCH_INTEGRATION_CN.md).
+The complete review contract is documented in
 [`docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md`](docs/V5_1_FINAL_ANALYSIS_STRATEGY_CN.md).
 The v5.2 DSB delta is documented in
 [`docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md`](docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md).

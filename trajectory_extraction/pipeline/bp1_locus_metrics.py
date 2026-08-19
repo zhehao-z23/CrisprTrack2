@@ -60,6 +60,266 @@ class BP1MetricParameters:
                 raise ValueError(f"{name} must be in [0, 1]")
 
 
+@dataclass(frozen=True)
+class BP1SegmentationParameters:
+    """Frozen, sensitivity-first component-generation settings.
+
+    These are engineering parameters for producing reviewable component
+    candidates.  They are not a biological 53BP1-positive/negative classifier.
+    """
+
+    gaussian_sigma_px: float = 1.0
+    threshold_robust_z: float = 2.5
+    minimum_component_area_px: int = 3
+    lineage_dilation_px: int = 1
+
+    def validate(self) -> None:
+        if self.gaussian_sigma_px < 0:
+            raise ValueError("gaussian_sigma_px must be non-negative")
+        if self.threshold_robust_z <= 0:
+            raise ValueError("threshold_robust_z must be positive")
+        if self.minimum_component_area_px < 1:
+            raise ValueError("minimum_component_area_px must be >= 1")
+        if self.lineage_dilation_px < 0:
+            raise ValueError("lineage_dilation_px must be non-negative")
+
+
+def _robust_threshold(
+    image: np.ndarray, nucleus_mask: np.ndarray, robust_z: float
+) -> tuple[float, float, float, str]:
+    values = np.asarray(image[nucleus_mask], dtype=float)
+    if values.size == 0:
+        return math.nan, math.nan, math.nan, "NO_NUCLEAR_BACKGROUND"
+    location = float(np.median(values))
+    scale = 1.4826 * float(np.median(np.abs(values - location)))
+    method = "MEDIAN_MAD"
+    if not np.isfinite(scale) or scale <= 0:
+        scale = float(np.std(values))
+        method = "MEDIAN_STD_FALLBACK"
+    if not np.isfinite(scale) or scale <= 0:
+        return math.nan, location, scale, "ZERO_BACKGROUND_SCALE"
+    return location + robust_z * scale, location, scale, method
+
+
+def _joined_ids(values: Iterable[int]) -> str:
+    return ";".join(str(value) for value in sorted(set(int(item) for item in values)))
+
+
+def _assign_focus_lineages(
+    labels: np.ndarray, object_rows: list[dict[str, object]], dilation_px: int
+) -> None:
+    """Track components using reciprocal maximum adjacent-frame mask overlap.
+
+    There is deliberately no centroid fallback, gap closing, interpolation, or
+    use of a DNA trajectory.  Split/merge edges are retained in the audit even
+    when the dominant reciprocal branch keeps its track identity.
+    """
+
+    if not object_rows:
+        return
+    assignments: dict[tuple[int, int], dict[str, object]] = {}
+    children: dict[tuple[int, int], set[int]] = {}
+    child_tracks: dict[tuple[int, int], set[int]] = {}
+    next_track = 1
+    for object_id in (int(value) for value in np.unique(labels[0]) if int(value) > 0):
+        assignments[(1, object_id)] = {
+            "focus_track_id": next_track,
+            "lineage_event": "NEW",
+            "previous_frame_object_ids": "",
+            "parent_focus_track_ids": "",
+            "overlap_px_previous": 0,
+            "dilated_overlap_px_previous": 0,
+        }
+        next_track += 1
+
+    structure = ndimage.generate_binary_structure(2, 1)
+    for frame_index in range(1, labels.shape[0]):
+        frame = frame_index + 1
+        previous_frame = frame - 1
+        previous_ids = [int(value) for value in np.unique(labels[frame_index - 1]) if int(value) > 0]
+        current_ids = [int(value) for value in np.unique(labels[frame_index]) if int(value) > 0]
+        previous_masks = {value: labels[frame_index - 1] == value for value in previous_ids}
+        current_masks = {value: labels[frame_index] == value for value in current_ids}
+        previous_dilated = {
+            value: ndimage.binary_dilation(mask, structure=structure, iterations=dilation_px)
+            if dilation_px else mask
+            for value, mask in previous_masks.items()
+        }
+        current_dilated = {
+            value: ndimage.binary_dilation(mask, structure=structure, iterations=dilation_px)
+            if dilation_px else mask
+            for value, mask in current_masks.items()
+        }
+        previous_to_current = {value: set() for value in previous_ids}
+        current_to_previous = {value: set() for value in current_ids}
+        overlaps: dict[tuple[int, int], tuple[int, int]] = {}
+        for previous_id, previous_mask in previous_masks.items():
+            for current_id, current_mask in current_masks.items():
+                direct = int(np.count_nonzero(previous_mask & current_mask))
+                dilated = int(np.count_nonzero(previous_dilated[previous_id] & current_dilated[current_id]))
+                if direct <= 0 and dilated <= 0:
+                    continue
+                previous_to_current[previous_id].add(current_id)
+                current_to_previous[current_id].add(previous_id)
+                overlaps[(previous_id, current_id)] = (direct, dilated)
+
+        def unique_best(candidates: Iterable[int], score) -> int | None:
+            candidates = sorted(candidates)
+            if not candidates:
+                return None
+            values = {candidate: score(candidate) for candidate in candidates}
+            best = max(values.values())
+            winners = [candidate for candidate, value in values.items() if value == best]
+            return winners[0] if len(winners) == 1 else None
+
+        for current_id in current_ids:
+            parents = current_to_previous[current_id]
+            parent_tracks = {
+                int(assignments[(previous_frame, parent)]["focus_track_id"])
+                for parent in parents
+            }
+            primary_parent = unique_best(
+                parents, lambda parent: overlaps[(parent, current_id)]
+            )
+            reciprocal = primary_parent is not None and unique_best(
+                previous_to_current[primary_parent],
+                lambda child: overlaps[(primary_parent, child)],
+            ) == current_id
+            if reciprocal:
+                track_id = int(assignments[(previous_frame, primary_parent)]["focus_track_id"])
+                has_merge = len(parents) > 1
+                has_split = len(previous_to_current[primary_parent]) > 1
+                event = (
+                    "CONTINUE_COMPLEX" if has_merge and has_split else
+                    "CONTINUE_THROUGH_MERGE" if has_merge else
+                    "CONTINUE_THROUGH_SPLIT" if has_split else "CONTINUE"
+                )
+                parent_track_text = _joined_ids(parent_tracks - {track_id})
+            else:
+                track_id = next_track
+                next_track += 1
+                parent_track_text = _joined_ids(parent_tracks)
+                if not parents:
+                    event = "NEW"
+                elif len(parents) > 1 and any(len(previous_to_current[parent]) > 1 for parent in parents):
+                    event = "COMPLEX_CHILD"
+                elif len(parents) > 1:
+                    event = "MERGE_CHILD"
+                else:
+                    event = "SPLIT_CHILD"
+            assignments[(frame, current_id)] = {
+                "focus_track_id": track_id,
+                "lineage_event": event,
+                "previous_frame_object_ids": _joined_ids(parents),
+                "parent_focus_track_ids": parent_track_text,
+                "overlap_px_previous": sum(overlaps[(parent, current_id)][0] for parent in parents),
+                "dilated_overlap_px_previous": sum(overlaps[(parent, current_id)][1] for parent in parents),
+            }
+            for parent in parents:
+                children.setdefault((previous_frame, parent), set()).add(current_id)
+                child_tracks.setdefault((previous_frame, parent), set()).add(track_id)
+
+    track_frames: dict[int, set[int]] = {}
+    for row in object_rows:
+        key = (int(row["frame"]), int(row["object_id"]))
+        assignment = assignments[key]
+        row.update(assignment)
+        track_id = int(assignment["focus_track_id"])
+        row["next_frame_object_ids"] = _joined_ids(children.get(key, set()))
+        row["child_focus_track_ids"] = _joined_ids(
+            child_tracks.get(key, set()) - {track_id}
+        )
+        track_frames.setdefault(track_id, set()).add(int(row["frame"]))
+    for row in object_rows:
+        frames = track_frames[int(row["focus_track_id"])]
+        row["focus_track_first_frame"] = min(frames)
+        row["focus_track_last_frame"] = max(frames)
+        row["focus_track_length_frames"] = len(frames)
+
+
+def segment_focus_stack(
+    stack: np.ndarray,
+    nucleus_masks: np.ndarray,
+    pixel_size_nm: float,
+    parameters: BP1SegmentationParameters | None = None,
+) -> tuple[np.ndarray, list[dict[str, object]], list[dict[str, object]]]:
+    """Segment all eligible per-frame Green components and assign lineages."""
+
+    parameters = parameters or BP1SegmentationParameters()
+    parameters.validate()
+    if stack.ndim != 3 or nucleus_masks.shape != stack.shape:
+        raise ValueError("stack and nucleus_masks must be matching TYX arrays")
+    if pixel_size_nm <= 0:
+        raise ValueError("pixel_size_nm must be positive")
+    labels = np.zeros(stack.shape, dtype=np.uint16)
+    frame_rows: list[dict[str, object]] = []
+    object_rows: list[dict[str, object]] = []
+    dtype_max = np.iinfo(stack.dtype).max if np.issubdtype(stack.dtype, np.integer) else math.nan
+    for frame_index, (raw_image, nucleus) in enumerate(zip(stack, nucleus_masks, strict=True)):
+        frame = frame_index + 1
+        nucleus = np.asarray(nucleus, dtype=bool)
+        smoothed = ndimage.gaussian_filter(raw_image.astype(float), parameters.gaussian_sigma_px)
+        threshold, background, scale, method = _robust_threshold(
+            smoothed, nucleus, parameters.threshold_robust_z
+        )
+        foreground = (smoothed > threshold) & nucleus if np.isfinite(threshold) else np.zeros(nucleus.shape, bool)
+        raw_labels, raw_count = ndimage.label(foreground)
+        sizes = np.bincount(raw_labels.ravel(), minlength=raw_count + 1)
+        eligible = [value for value in range(1, raw_count + 1) if sizes[value] >= parameters.minimum_component_area_px]
+        nucleus_edge = nucleus & ~ndimage.binary_erosion(nucleus, iterations=1)
+        for object_id, source_id in enumerate(eligible, start=1):
+            component = raw_labels == source_id
+            labels[frame_index][component] = object_id
+            yy, xx = np.nonzero(component)
+            values = raw_image[component].astype(float)
+            weights = np.maximum(values - background, 0.0)
+            centroid_y = float(np.average(yy, weights=weights)) if weights.sum() > 0 else float(np.mean(yy))
+            centroid_x = float(np.average(xx, weights=weights)) if weights.sum() > 0 else float(np.mean(xx))
+            area = int(values.size)
+            y_min, y_max = int(yy.min()), int(yy.max())
+            x_min, x_max = int(xx.min()), int(xx.max())
+            object_rows.append({
+                "frame": frame,
+                "object_id": object_id,
+                "source_threshold_component_id": source_id,
+                "area_px": area,
+                "area_um2": area * (pixel_size_nm / 1000.0) ** 2,
+                "equivalent_radius_nm": math.sqrt(area / math.pi) * pixel_size_nm,
+                "centroid_x_px": centroid_x,
+                "centroid_y_px": centroid_y,
+                "centroid_x_nm": (centroid_x + 1.0) * pixel_size_nm,
+                "centroid_y_nm": (centroid_y + 1.0) * pixel_size_nm,
+                "bbox_x_min_px": x_min,
+                "bbox_x_max_px": x_max,
+                "bbox_y_min_px": y_min,
+                "bbox_y_max_px": y_max,
+                "mean_intensity_au": float(values.mean()),
+                "median_intensity_au": float(np.median(values)),
+                "maximum_intensity_au": float(values.max()),
+                "integrated_excess_intensity_au": float(np.sum(values - background)),
+                "dtype_saturated_pixel_fraction": float(np.mean(values >= dtype_max)) if np.isfinite(dtype_max) else None,
+                "touches_nucleus_boundary": bool(np.any(component & nucleus_edge)),
+                "touches_image_boundary": bool(y_min == 0 or x_min == 0 or y_max == raw_image.shape[0] - 1 or x_max == raw_image.shape[1] - 1),
+            })
+        frame_rows.append({
+            "frame": frame,
+            "segmentation_status": "VALID" if np.isfinite(threshold) else method,
+            "segmentation_gaussian_sigma_px": parameters.gaussian_sigma_px,
+            "segmentation_threshold_au": finite_or_none(threshold),
+            "nuclear_background_median_au": finite_or_none(background),
+            "robust_background_scale_au": finite_or_none(scale),
+            "threshold_method": method,
+            "threshold_robust_z": parameters.threshold_robust_z,
+            "nucleus_area_px": int(nucleus.sum()),
+            "raw_threshold_component_count": int(raw_count),
+            "eligible_component_count": len(eligible),
+            "raw_foreground_area_px": int(foreground.sum()),
+            "eligible_foreground_area_px": int(np.count_nonzero(labels[frame_index])),
+        })
+    _assign_focus_lineages(labels, object_rows, parameters.lineage_dilation_px)
+    return labels, frame_rows, object_rows
+
+
 def finite_or_none(value: float) -> float | None:
     return float(value) if np.isfinite(value) else None
 

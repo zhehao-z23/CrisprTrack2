@@ -24,7 +24,7 @@ from align_microsam_mask import discover_microsam_mask
 import experiment_profiles
 
 
-VERSION = "v5.2.0"
+VERSION = "v5.2.1"
 SINGLE_CELL_RUNNER = HERE / "run_full_pipeline_v4.py"
 
 
@@ -111,14 +111,32 @@ def tail_log(analysis_dir: Path, args: argparse.Namespace, line_count: int = 25)
     return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-line_count:])
 
 
+def bp1_output_info(analysis_dir: Path, args: argparse.Namespace) -> tuple[str, str]:
+    if args.experiment_profile != "dsb_53bp1_site1_site2":
+        return "not_applicable", ""
+    result_dir = analysis_dir / (
+        f"anchor_roi_v4_{args.experiment_profile}{result_suffix(args)}"
+    )
+    path = result_dir / "53bp1_metrics" / "bp1_analysis_manifest.json"
+    if not path.is_file():
+        return "missing_or_not_reached", str(path)
+    try:
+        status = str(json.loads(path.read_text(encoding="utf-8")).get("status", "unknown"))
+    except (OSError, ValueError, TypeError):
+        status = "unreadable_manifest"
+    return status.lower(), str(path)
+
+
 def run_cell(crop: Path, args: argparse.Namespace) -> dict:
     # Selection views contain symlinks into the immutable candidate archive.
     # Resolve first so resume checks and the child runner inspect the same result.
     analysis_dir = crop.resolve().with_suffix("")
     if args.resume and completion_matches(analysis_dir, args):
+        bp1_status, bp1_manifest = bp1_output_info(analysis_dir, args)
         return {
             "crop": str(crop), "analysis_dir": str(analysis_dir), "status": "skipped_complete",
             "experiment_profile": args.experiment_profile,
+            "bp1_metrics_status": bp1_status, "bp1_metrics_manifest": bp1_manifest,
             "started_at": "", "finished_at": now(), "duration_s": 0.0, "exit_code": 0, "error_tail": "",
         }
     command = [
@@ -166,9 +184,11 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
         )
     except Exception as exc:
         exit_code, status, error_tail = -1, "failed_to_start", repr(exc)
+    bp1_status, bp1_manifest = bp1_output_info(analysis_dir, args)
     return {
         "crop": str(crop), "analysis_dir": str(analysis_dir), "status": status,
         "experiment_profile": args.experiment_profile,
+        "bp1_metrics_status": bp1_status, "bp1_metrics_manifest": bp1_manifest,
         "started_at": started_at, "finished_at": now(),
         "duration_s": round(time.perf_counter() - started, 1),
         "exit_code": exit_code, "error_tail": error_tail,
@@ -178,7 +198,8 @@ def run_cell(crop: Path, args: argparse.Namespace) -> dict:
 def write_summary(path: Path, rows: list[dict]) -> None:
     fields = [
         "crop", "analysis_dir", "experiment_profile", "status", "started_at",
-        "finished_at", "duration_s", "exit_code", "error_tail",
+        "finished_at", "duration_s", "exit_code", "bp1_metrics_status",
+        "bp1_metrics_manifest", "error_tail",
     ]
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)

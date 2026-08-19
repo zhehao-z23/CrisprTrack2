@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.2.1 — 2026-08-18
+
+- Integrate the frozen per-frame 53BP1 component, continuous-intensity and
+  bounded-distance measurements into the formal DSB single-cell and batch
+  runners as a sidecar stage after baseline selection.
+- Save a compressed TYX label stack, frame segmentation table, component and
+  conservative adjacent-frame lineage table, dense allele-by-frame metrics,
+  allele summaries, source hashes, timing provenance and interpretation limits.
+- Preserve the v5.2 candidate QC, P/R reference, ROI, SPT, linker and longest-
+  baseline contracts exactly; P/Site2-only alleles remain valid inputs.
+- Add synthetic end-to-end/no-R tests and real-crop equivalence validation
+  against the frozen 53BP1 pilot.
+
 ### 5.2.0 53BP1 locus metrics addendum
 
 - Add independent Site2/P-centred 53BP1 readouts: a continuous local-excess

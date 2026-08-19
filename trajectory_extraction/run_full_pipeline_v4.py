@@ -27,9 +27,10 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-VERSION = "v5.2.0"
+VERSION = "v5.2.1"
 STAGE1 = PIPELINE / "auto_roi_for_published_v2.13.py"
 SPT = PIPELINE / "run_anchor_roi_spt.py"
+BP1_METRICS = PIPELINE / "export_bp1_locus_metrics.py"
 PYTHON_QC = PIPELINE / "visualize_anchor_roi_results.py"
 MATLAB_QC = PIPELINE / "plot_longest_trajectories.m"
 
@@ -187,6 +188,7 @@ def main() -> None:
         "static_union_rois",
         "roi_spt",
         "baseline_longest",
+        "53bp1_metrics",
         "audit",
         "figures",
     ):
@@ -210,6 +212,14 @@ def main() -> None:
         "profile_validation": profile_validation,
         "python_executable": sys.executable,
         "options": vars(args),
+        "sidecar_stages": {
+            "53bp1_locus_metrics": {
+                "enabled": is_dsb,
+                "schema_version": "v5.2.1-bp1-locus-sidecar-v1" if is_dsb else None,
+                "output_dir": str(results_dir / "53bp1_metrics") if is_dsb else None,
+                "measurement_only": True,
+            }
+        },
     }
     manifest["options"] = {key: str(value) if isinstance(value, Path) else value for key, value in manifest["options"].items()}
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -328,6 +338,24 @@ def main() -> None:
             if args.max_step_px is not None:
                 spt_command.extend(["--max-step-px", str(args.max_step_px)])
             run(spt_command)
+
+            if is_dsb:
+                bp1_command = [
+                    sys.executable,
+                    str(BP1_METRICS),
+                    str(analysis_dir),
+                    "--aligned-nucleus-mask",
+                    str(aligned_mask),
+                    "--baseline-manifest",
+                    str(results_dir / "baseline_longest" / "baseline_manifest.csv"),
+                    "--output-dir",
+                    str(results_dir / "53bp1_metrics"),
+                ]
+                if crop_metadata_sidecar is not None:
+                    bp1_command.extend(
+                        ["--crop-metadata-sidecar", str(crop_metadata_sidecar)]
+                    )
+                run(bp1_command)
 
             run([sys.executable, str(PYTHON_QC), str(analysis_dir), "--results-dir", str(results_dir)])
             matlab_output = results_dir / "figures" / "matlab_longest"

@@ -5,7 +5,7 @@ Automated, profile-locked trajectory extraction and single-particle tracking
 single-cell, multi-channel TIFF plus its acquisition sidecar and exact
 micro-SAM mask into audited 2-D Gaussian trajectories for the G/R/P channels.
 
-The current code version is **`v5.2.0`**. The production
+The current code version is **`v5.2.1`**. The production
 entry points are still named `run_full_pipeline_v4.py` and
 `run_batch_pipeline_v4.py`, and result directories still begin with
 `anchor_roi_v4_`. Those names and the output layout are intentionally retained
@@ -15,6 +15,12 @@ v5.2 retains the v5.1 global-gap, mask, `max_disp`, reference and coordinate
 contracts. For the DSB profile only, its default additionally uses a P-gated,
 Red-autonomous reference and channel-specific P/R ROIs. See
 [`../docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md`](../docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md).
+
+v5.2.1 additionally writes `53bp1_metrics/` for DSB crops after baseline
+selection. This is a measurement-only sidecar: no component or score is fed
+back into candidate QC, reference detection, ROI construction, localization,
+linking, or baseline selection. Chr3 execution is unchanged. See
+[`../docs/V5_2_1_53BP1_BATCH_INTEGRATION_CN.md`](../docs/V5_2_1_53BP1_BATCH_INTEGRATION_CN.md).
 
 v5.1 fixed the reviewed mask,
 reference, movie-level `max_disp`, and coordinate policies. See

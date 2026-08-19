@@ -1,5 +1,17 @@
 # Changelog
 
+### 5.2.0 53BP1 locus metrics addendum
+
+- Add independent Site2/P-centred 53BP1 readouts: a continuous local-excess
+  intensity metric with a 1.7-um aperture and no positivity cutoff, plus a
+  segmented-component boundary-distance metric that fails closed at 1.0 um.
+- Preserve signed intensity audits, signed component-boundary distance,
+  rejected-nearest-component evidence and ambiguity margins; missing, distant
+  or ambiguous components receive distance score zero without suppressing the
+  independent intensity measurement.
+- Add synthetic contract tests and a Chinese parameter/data-contract document.
+  Full-cohort workflow integration remains gated on pilot review.
+
 ## 5.2.0 — 2026-08-18
 
 - Add a DSB-only P-gated, Red-autonomous reference path. Purple defines a

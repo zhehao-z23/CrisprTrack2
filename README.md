@@ -7,11 +7,13 @@ then using those trajectories to model nuclear and local chromatin features.
 
 This snapshot is **v5.2.1**. It retains the v5.1 mask, max-disp, reference and
 coordinate contracts and adds a DSB-specific channel-decoupled strategy:
-Purple supplies canonical allele identities and a 2.5-um Red harvest domain,
-Red reference tracks are built only by Red continuity with at most one missing
-frame, identity pairing requires at least 25% movie support and uses
-common-frame median P-R distance, and P/R ROIs use per-valid-segment convex
-hulls plus 5 px. The v5.1 foundations remain: zero micro-SAM mask expansion,
+Purple supplies canonical allele identities, while Red reference candidates
+are detected and linked autonomously across the nucleus by Red continuity with
+at most one missing frame. Purple is consulted only during final identity
+pairing, which requires at least 25% movie support and a common-frame median
+P-R distance no greater than 2.5 um; P-only alleles remain valid. P/R ROIs use
+per-valid-segment convex hulls plus 5 px. The v5.1 foundations remain: zero
+micro-SAM mask expansion,
 movie-level 97.5% trajectory-coverage calibration of one fixed `max_disp`,
 fully contained and edge-filtered reference components, separate reference
 seed/tracking thresholds, and a shared pixel-centre coordinate contract.

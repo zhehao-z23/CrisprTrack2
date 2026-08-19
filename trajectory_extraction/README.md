@@ -12,8 +12,9 @@ entry points are still named `run_full_pipeline_v4.py` and
 for compatibility; runtime manifests identify the run as v5.
 
 v5.2 retains the v5.1 global-gap, mask, `max_disp`, reference and coordinate
-contracts. For the DSB profile only, its default additionally uses a P-gated,
-Red-autonomous reference and channel-specific P/R ROIs. See
+contracts. For the DSB profile only, its default additionally detects and links
+Red reference candidates autonomously across the nucleus, consults Purple only
+during final identity pairing, and uses channel-specific P/R ROIs. See
 [`../docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md`](../docs/V5_2_DSB_CHANNEL_SPECIFIC_REFERENCE_STRATEGY_CN.md).
 
 v5.2.1 additionally writes `53bp1_metrics/` for DSB crops after baseline
@@ -344,8 +345,8 @@ trajectory_batch_v4_<experiment_profile>_summary.csv
 | `--reference-tracking-k` | profile default | DSB Purple uses `0.5` for per-frame tracking. |
 | `--reference-edge-width-px` | `3` | Inner consensus-mask boundary band. |
 | `--reference-max-edge-fraction` | `0.10` | Maximum component fraction in the boundary band. |
-| `--target-reference-mode` | `auto` | DSB resolves to `p_gated_r_autonomous`; Chr3 resolves to `legacy`. |
-| `--red-harvest-radius-um` | `2.5` | DSB per-frame Red candidate harvest radius around observed P positions. |
+| `--target-reference-mode` | `auto` | DSB resolves to `independent_r_autonomous`; Chr3 resolves to `legacy`. The older `p_gated_r_autonomous` path is retained only for explicit sensitivity comparisons. |
+| `--red-harvest-radius-um` | `2.5` | In the default DSB mode this is the maximum common-frame median P-R distance accepted at final pairing, not a Red detection-harvest radius. |
 | `--red-min-track-points` | `5` | Minimum independently linked Red reference-candidate points. |
 | `--red-min-shared-frames` | `5` | Minimum common P/R frames for identity pairing. |
 | `--red-min-movie-coverage-fraction` | `0.25` | Pairing also requires common-frame support in at least 25% of all movie frames. |

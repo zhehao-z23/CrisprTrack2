@@ -2,6 +2,10 @@
 
 ## 5.2.1 — 2026-08-18
 
+- Resolve the formal DSB single-crop and batch `auto` modes to
+  `independent_r_autonomous`: Red candidates are harvested over the whole
+  nucleus and Purple is consulted only at final identity pairing. Retain the
+  older P-gated mode as an explicit sensitivity option, never as the default.
 - Integrate the frozen per-frame 53BP1 component, continuous-intensity and
   bounded-distance measurements into the formal DSB single-cell and batch
   runners as a sidecar stage after baseline selection.

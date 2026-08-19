@@ -136,6 +136,16 @@ class BP1FormalExporterTests(unittest.TestCase):
             self.assertEqual(status, "complete")
             self.assertEqual(Path(path), manifest)
 
+    def test_batch_result_suffix_separates_independent_red_outputs(self):
+        args = SimpleNamespace(
+            target_reference_mode="independent_r_autonomous",
+            roi_geometry="validated_segment_convex_hull",
+        )
+        self.assertEqual(
+            run_batch_pipeline_v4.result_suffix(args),
+            "_independent_r_autonomous_validated_segment_convex_hull",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,16 @@ class V5VersionContractTests(unittest.TestCase):
                     source,
                 )
 
+    def test_formal_dsb_auto_mode_is_independent_red(self) -> None:
+        for runner in RUNNERS[:2]:
+            with self.subTest(runner=runner.relative_to(ROOT)):
+                source = runner.read_text(encoding="utf-8")
+                self.assertIn(
+                    'args.target_reference_mode = "independent_r_autonomous" if is_dsb else "legacy"',
+                    source,
+                )
+                self.assertIn('"independent_r_autonomous"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

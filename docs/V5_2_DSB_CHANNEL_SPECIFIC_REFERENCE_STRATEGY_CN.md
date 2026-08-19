@@ -1,5 +1,13 @@
 # v5.2 DSB 通道特异 reference 与 ROI 策略
 
+> **v5.2.1 formal-runner correction (authoritative):** DSB `auto` resolves to
+> `independent_r_autonomous`. Red components are harvested over the whole
+> aligned nucleus and linked only by Red continuity. Purple is not used during
+> Red detection or linking; it is consulted only at final one-to-one pairing.
+> The frozen 2.5 um value is therefore the final common-frame median P-R
+> distance ceiling. The older `p_gated_r_autonomous` path remains available
+> only when explicitly requested for sensitivity comparison.
+
 ## 适用范围
 
 本变更只默认应用于 `dsb_53bp1_site1_site2`。Chr3 profile 继续使用 v5.1

@@ -115,9 +115,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-reference-mode",
-        choices=("auto", "legacy", "p_gated_r_autonomous"),
+        choices=(
+            "auto",
+            "legacy",
+            "p_gated_r_autonomous",
+            "independent_r_autonomous",
+        ),
         default="auto",
-        help="auto selects the v5.2 P-gated autonomous Red mode for DSB only.",
+        help=(
+            "auto selects the v5.2 whole-nucleus autonomous Red mode for DSB; "
+            "P is consulted only during final identity pairing."
+        ),
     )
     parser.add_argument("--red-harvest-radius-um", type=float, default=2.5)
     parser.add_argument("--red-min-track-points", type=int, default=5)
@@ -169,13 +177,21 @@ def main() -> None:
     anchor_channel = profile.anchor_channel
     is_dsb = profile.name == "dsb_53bp1_site1_site2"
     if args.target_reference_mode == "auto":
-        args.target_reference_mode = "p_gated_r_autonomous" if is_dsb else "legacy"
+        args.target_reference_mode = "independent_r_autonomous" if is_dsb else "legacy"
     if args.roi_geometry == "auto":
         args.roi_geometry = "validated_segment_convex_hull" if is_dsb else "tube"
-    if args.target_reference_mode == "p_gated_r_autonomous" and not is_dsb:
-        raise ValueError("p_gated_r_autonomous is defined only for the DSB profile")
-    if args.target_reference_mode == "p_gated_r_autonomous":
-        geometry_suffix = "_p_gated_r_autonomous_" + args.roi_geometry
+    if args.target_reference_mode in {
+        "p_gated_r_autonomous",
+        "independent_r_autonomous",
+    } and not is_dsb:
+        raise ValueError(
+            f"{args.target_reference_mode} is defined only for the DSB profile"
+        )
+    if args.target_reference_mode in {
+        "p_gated_r_autonomous",
+        "independent_r_autonomous",
+    }:
+        geometry_suffix = f"_{args.target_reference_mode}_{args.roi_geometry}"
     else:
         geometry_suffix = "" if args.roi_geometry == "tube" else f"_{args.roi_geometry}"
     results_dir = analysis_dir / (
@@ -311,7 +327,10 @@ def main() -> None:
                 "--channel-specific-reference-mode",
                 (
                     "p_r_specific"
-                    if args.target_reference_mode == "p_gated_r_autonomous"
+                    if args.target_reference_mode in {
+                        "p_gated_r_autonomous",
+                        "independent_r_autonomous",
+                    }
                     else "legacy"
                 ),
                 "--roi-dilation-px",

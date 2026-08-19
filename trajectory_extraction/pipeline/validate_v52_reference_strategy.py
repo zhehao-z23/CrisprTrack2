@@ -134,7 +134,7 @@ def main() -> None:
             "--output-dir", str(anchor_out),
             "--reference-edge-width-px", "3.0",
             "--reference-max-edge-fraction", "0.10",
-            "--target-reference-mode", "p_gated_r_autonomous",
+            "--target-reference-mode", "independent_r_autonomous",
             "--red-harvest-radius-um", str(args.harvest_radius_um),
             "--red-min-track-points", "5",
             "--red-min-shared-frames", "5",
@@ -240,9 +240,9 @@ def main() -> None:
         "production_stage1": str(STAGE1_PATH),
         "harvest_radius_um": args.harvest_radius_um,
         "red_linking": (
-            "Red-to-Red endpoints only; adjacent first; at most "
+            "whole-nucleus Red detection; Red-to-Red endpoints only; adjacent first; at most "
             f"{args.red_max_missing_frames} missing frame(s); 750 nm fixed radius; "
-            "no interpolation or P fallback"
+            "no interpolation, P harvest gate, or P fallback"
         ),
         "pairing": (
             "common-frame median P-R distance; >=5 shared frames and >="

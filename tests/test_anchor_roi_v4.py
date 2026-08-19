@@ -279,6 +279,25 @@ class StaticRoiTests(unittest.TestCase):
 
 
 class PGatedRedReferenceTests(unittest.TestCase):
+    def test_autonomous_red_harvest_does_not_consult_p(self):
+        rng = np.random.default_rng(19)
+        stack = rng.normal(100.0, 1.0, size=(3, 48, 48)).astype(np.float32)
+        stack[0, 29:32, 29:33] += 100.0
+        stack[1, 29:32, 30:34] += 100.0
+        stack[2, 30:33, 31:35] += 100.0
+        tracks, audit = auto_roi_v213.build_autonomous_red_candidates(
+            stack,
+            [np.ones((48, 48), dtype=bool) for _ in range(3)],
+            k=0.5,
+            inter_frame_max_px=3.0,
+            minimum_points=3,
+            maximum_missing_frames=1,
+        )
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual([point[0] for point in tracks[0]], [0, 1, 2])
+        self.assertTrue(all(row["harvest_domain"] == "whole_nucleus" for row in audit))
+        self.assertTrue(all(row["nearest_p_locus"] == "" for row in audit))
+
     def test_red_continuity_never_falls_back_to_p_position(self):
         rng = np.random.default_rng(7)
         stack = rng.normal(100.0, 1.0, size=(3, 48, 48)).astype(np.float32)

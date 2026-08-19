@@ -902,28 +902,36 @@ def match_seeds_to_reference(seed_trajs: list, seed_ks: list,
     return assignments
 
 
-def build_p_gated_red_candidates(
+def _build_red_candidates(
     stack: np.ndarray,
-    reference_trajs_dict: dict,
     nucleus_masks: list,
     *,
     k: float,
-    harvest_radius_px: float,
     inter_frame_max_px: float,
     minimum_points: int,
     maximum_missing_frames: int,
+    p_reference_trajs_dict: dict | None = None,
+    harvest_radius_px: float | None = None,
 ) -> tuple[list[list[tuple[int, float, float]]], list[dict]]:
-    """Harvest near P, then link strictly by Red continuity.
+    """Detect Red components, then link strictly by Red continuity.
 
-    P positions only gate per-frame Red detections.  Linking uses Red endpoints
-    alone, gives immediately adjacent frames first priority, and then permits a
-    fixed number of missing frames within the same ``inter_frame_max_px``.
-    Missing positions are never interpolated and P is never used as a fallback.
+    When ``p_reference_trajs_dict`` is supplied, P positions gate the per-frame
+    detection harvest.  When it is ``None``, all eligible nuclear Red components
+    are harvested and P is not read until the separate final pairing step.
+    Linking always uses Red endpoints alone, gives immediately adjacent frames
+    first priority, and then permits a fixed number of missing frames within the
+    same ``inter_frame_max_px``.  Missing positions are never interpolated and P
+    is never used as a tracking fallback.
     """
     reference_by_frame = defaultdict(list)
-    for label, trajectory in reference_trajs_dict.items():
-        for frame, y, x in trajectory:
-            reference_by_frame[int(frame)].append((int(label), float(y), float(x)))
+    if p_reference_trajs_dict is not None:
+        if harvest_radius_px is None or harvest_radius_px <= 0:
+            raise ValueError("P-gated Red harvest requires a positive radius")
+        for label, trajectory in p_reference_trajs_dict.items():
+            for frame, y, x in trajectory:
+                reference_by_frame[int(frame)].append(
+                    (int(label), float(y), float(x))
+                )
 
     tracks: list[list[tuple[int, float, float]]] = []
     detection_audit: list[dict] = []
@@ -949,15 +957,18 @@ def build_p_gated_red_candidates(
                 y, x, nucleus_masks[frame_index]
             ):
                 continue
-            distances = [
-                (float(np.hypot(y - py, x - px)), label)
-                for label, py, px in references
-            ]
-            if not distances:
-                continue
-            nearest_distance, nearest_label = min(distances)
-            if nearest_distance > harvest_radius_px:
-                continue
+            if p_reference_trajs_dict is None:
+                nearest_distance, nearest_label = "", ""
+            else:
+                distances = [
+                    (float(np.hypot(y - py, x - px)), label)
+                    for label, py, px in references
+                ]
+                if not distances:
+                    continue
+                nearest_distance, nearest_label = min(distances)
+                if nearest_distance > harvest_radius_px:
+                    continue
             candidates.append((float(y), float(x), int(component_id), int(size)))
             detection_audit.append({
                 "frame": int(frame_index + 1),
@@ -966,9 +977,20 @@ def build_p_gated_red_candidates(
                 "area_px": int(size),
                 "y_px": float(y),
                 "x_px": float(x),
-                "nearest_p_locus": int(nearest_label),
-                "nearest_p_distance_px": float(nearest_distance),
-                "harvest_radius_px": float(harvest_radius_px),
+                "nearest_p_locus": (
+                    int(nearest_label) if nearest_label != "" else ""
+                ),
+                "nearest_p_distance_px": (
+                    float(nearest_distance) if nearest_distance != "" else ""
+                ),
+                "harvest_radius_px": (
+                    float(harvest_radius_px)
+                    if p_reference_trajs_dict is not None else ""
+                ),
+                "harvest_domain": (
+                    "p_neighborhood"
+                    if p_reference_trajs_dict is not None else "whole_nucleus"
+                ),
             })
 
         matched_tracks: set[int] = set()
@@ -1045,6 +1067,50 @@ def build_p_gated_red_candidates(
         row["retained_minimum_points"] = source_index in retained_id
     retained = [track for _source_index, track in retained_with_source]
     return retained, detection_audit
+
+
+def build_p_gated_red_candidates(
+    stack: np.ndarray,
+    reference_trajs_dict: dict,
+    nucleus_masks: list,
+    *,
+    k: float,
+    harvest_radius_px: float,
+    inter_frame_max_px: float,
+    minimum_points: int,
+    maximum_missing_frames: int,
+) -> tuple[list[list[tuple[int, float, float]]], list[dict]]:
+    """Harvest Red near P in every frame, then link by Red continuity."""
+    return _build_red_candidates(
+        stack,
+        nucleus_masks,
+        k=k,
+        inter_frame_max_px=inter_frame_max_px,
+        minimum_points=minimum_points,
+        maximum_missing_frames=maximum_missing_frames,
+        p_reference_trajs_dict=reference_trajs_dict,
+        harvest_radius_px=harvest_radius_px,
+    )
+
+
+def build_autonomous_red_candidates(
+    stack: np.ndarray,
+    nucleus_masks: list,
+    *,
+    k: float,
+    inter_frame_max_px: float,
+    minimum_points: int,
+    maximum_missing_frames: int,
+) -> tuple[list[list[tuple[int, float, float]]], list[dict]]:
+    """Build Red tracks across the nucleus without consulting P positions."""
+    return _build_red_candidates(
+        stack,
+        nucleus_masks,
+        k=k,
+        inter_frame_max_px=inter_frame_max_px,
+        minimum_points=minimum_points,
+        maximum_missing_frames=maximum_missing_frames,
+    )
 
 
 def pair_red_candidates_to_purple(
@@ -1284,11 +1350,12 @@ def main():
     )
     parser.add_argument(
         "--target-reference-mode",
-        choices=("legacy", "p_gated_r_autonomous"),
+        choices=("legacy", "p_gated_r_autonomous", "independent_r_autonomous"),
         default="legacy",
         help=(
             "legacy keeps historical target tracking; p_gated_r_autonomous "
-            "uses P only for Red harvest/pairing and links Red by its own continuity."
+            "uses P for every-frame Red harvest; independent_r_autonomous "
+            "builds Red tracks over the whole nucleus and consults P only at final pairing."
         ),
     )
     parser.add_argument(
@@ -1333,8 +1400,15 @@ def main():
         parser.error("--reference-edge-width-px must be non-negative")
     if not 0 <= args.reference_max_edge_fraction <= 1:
         parser.error("--reference-max-edge-fraction must be in [0, 1]")
-    if args.target_reference_mode == "p_gated_r_autonomous" and reference_channel != "purple":
-        parser.error("p_gated_r_autonomous requires --reference-channel purple")
+    if (
+        args.target_reference_mode in {
+            "p_gated_r_autonomous", "independent_r_autonomous"
+        }
+        and reference_channel != "purple"
+    ):
+        parser.error(
+            f"{args.target_reference_mode} requires --reference-channel purple"
+        )
     if args.red_harvest_radius_um <= 0:
         parser.error("--red-harvest-radius-um must be positive")
     if args.red_min_track_points < 1 or args.red_min_shared_frames < 1:
@@ -1572,19 +1646,33 @@ def main():
     reference_detection_audit['reference_tracking'] = reference_tracking_audit
     reference_detection_audit['accepted_reference_count'] = len(accepted)
 
-    if args.target_reference_mode == "p_gated_r_autonomous":
+    if args.target_reference_mode in {
+        "p_gated_r_autonomous", "independent_r_autonomous"
+    }:
         reference_trajs_dict = {item[0]: item[1] for item in accepted}
         harvest_radius_px = args.red_harvest_radius_um * PIXEL_SIZE_UM
-        red_candidates, red_detection_rows = build_p_gated_red_candidates(
-            stacks["red"],
-            reference_trajs_dict,
-            nucleus_masks,
-            k=TARGET_TRACKING_K["red"],
-            harvest_radius_px=harvest_radius_px,
-            inter_frame_max_px=_INTER_FRAME_MAX_PX_RED,
-            minimum_points=args.red_min_track_points,
-            maximum_missing_frames=args.red_max_missing_frames,
-        )
+        if args.target_reference_mode == "p_gated_r_autonomous":
+            red_candidates, red_detection_rows = build_p_gated_red_candidates(
+                stacks["red"],
+                reference_trajs_dict,
+                nucleus_masks,
+                k=TARGET_TRACKING_K["red"],
+                harvest_radius_px=harvest_radius_px,
+                inter_frame_max_px=_INTER_FRAME_MAX_PX_RED,
+                minimum_points=args.red_min_track_points,
+                maximum_missing_frames=args.red_max_missing_frames,
+            )
+            red_harvest_domain = "per-frame 2.5 um P neighborhood"
+        else:
+            red_candidates, red_detection_rows = build_autonomous_red_candidates(
+                stacks["red"],
+                nucleus_masks,
+                k=TARGET_TRACKING_K["red"],
+                inter_frame_max_px=_INTER_FRAME_MAX_PX_RED,
+                minimum_points=args.red_min_track_points,
+                maximum_missing_frames=args.red_max_missing_frames,
+            )
+            red_harvest_domain = "whole per-frame nucleus; no P coordinates read"
         red_assignments, red_pair_rows, red_pair_frame_rows = pair_red_candidates_to_purple(
             red_candidates,
             reference_trajs_dict,
@@ -1621,7 +1709,14 @@ def main():
                 path.write_text("", encoding="utf-8")
         reference_detection_audit["red_reference_mode"] = {
             "mode": args.target_reference_mode,
-            "harvest_radius_um": float(args.red_harvest_radius_um),
+            "harvest_domain": red_harvest_domain,
+            "harvest_radius_um": (
+                float(args.red_harvest_radius_um)
+                if args.target_reference_mode == "p_gated_r_autonomous" else None
+            ),
+            "final_pair_maximum_median_distance_um": float(
+                args.red_harvest_radius_um
+            ),
             "inter_frame_max_nm": float(INTER_FRAME_MAX_NM_RED),
             "continuity": (
                 "red-to-red endpoints only; adjacent frames prioritized; fixed-radius "
@@ -1648,7 +1743,8 @@ def main():
         }
         target_channels = tuple(channel for channel in target_channels if channel != "red")
         print(
-            f"\nP-gated autonomous Red: {len(red_candidates)} retained candidate(s), "
+            f"\n{args.target_reference_mode} Red: "
+            f"{len(red_candidates)} retained candidate(s), "
             f"{len(red_assignments)} unique P-R pair(s); Red removed from legacy target pass"
         )
     (out_dir / 'reference_detection_audit.json').write_text(

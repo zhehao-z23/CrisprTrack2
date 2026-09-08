@@ -1,0 +1,15 @@
+{
+  "source_commit": "9f4e28a7bdaa6847e876fa9e3de059de197d0441",
+  "modified_source_files": [
+    ".gitignore",
+    "docs/ND2_TO_TRAJECTORY_OPERATIONAL_GUIDE.md",
+    "requirements_nd2_to_traj.txt",
+    "requirements_tif_to_traj.txt",
+    "trajectory_extraction/README.md",
+    "trajectory_extraction/run_batch_pipeline_v4.py"
+  ],
+  "scientific_algorithm_change": false,
+  "runtime_fix": "Batch resume now compares red_min_movie_coverage_fraction and red_max_missing_frames.",
+  "dependency_fix": "Declare pandas for the v5.2.1 53BP1 sidecar in both install entrypoints.",
+  "new_workflow": "crisprtrack2.py dispatches unchanged segment/export/track stages with explicit output root."
+}

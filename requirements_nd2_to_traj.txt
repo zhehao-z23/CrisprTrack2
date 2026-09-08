@@ -21,6 +21,7 @@ Pillow==12.2.0
 matplotlib==3.11.0
 scikit-image==0.26.0
 tifffile==2026.6.1
+pandas==3.0.3
 
 # Nikon ND2 reading and lazy array access
 nd2==0.11.3

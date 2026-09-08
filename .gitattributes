@@ -1,0 +1,2 @@
+# Preserve frozen source bytes and provenance hashes across platforms.
+* -text

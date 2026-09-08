@@ -1,6 +1,0 @@
-Couldn't calculate interparticle distance in frame 21
-Couldn't calculate interparticle distance in frame 25
-Couldn't calculate interparticle distance in frame 26
-Couldn't calculate interparticle distance in frame 28
-Couldn't calculate interparticle distance in frame 29
-Couldn't calculate interparticle distance in frame 30

@@ -1,0 +1,43 @@
+{
+  "segmentation": {
+    "nucleus_channel": 0,
+    "margin": 30,
+    "min_area": 1000,
+    "max_area": 200000,
+    "border_margin": 5,
+    "mask_border_margin": -1,
+    "segmentation_mode": "apg",
+    "model_type": "vit_b_lm",
+    "device": "auto",
+    "preserve_all_candidates": true
+  },
+  "tracking": {
+    "experiment_profile": "dsb_53bp1_site1_site2",
+    "fiji_bin": "fiji",
+    "matlab_bin": "matlab",
+    "cell_workers": 1,
+    "matlab_workers": 1,
+    "matlab_save_filter_images": false,
+    "mask_dilation_px": 0,
+    "reference_seed_k": null,
+    "reference_tracking_k": null,
+    "reference_edge_width_px": 3.0,
+    "reference_max_edge_fraction": 0.1,
+    "target_reference_mode": "auto",
+    "roi_geometry": "auto",
+    "red_harvest_radius_um": 2.5,
+    "red_min_track_points": 5,
+    "red_min_shared_frames": 5,
+    "red_min_movie_coverage_fraction": 0.25,
+    "red_max_missing_frames": 1,
+    "red_uniqueness_margin_px": 1.0,
+    "roi_dilation_px": 5,
+    "d_star": 0.0041,
+    "alpha": 0.38,
+    "trajectory_coverage_probability": 0.975,
+    "localization_error_nm": 0.0,
+    "max_step_rounding_px": 0.05,
+    "max_step_px": null,
+    "resume": true
+  }
+}

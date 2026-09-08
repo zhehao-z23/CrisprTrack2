@@ -1,3 +1,0 @@
-# Compatibility entry point for older commands run from this directory.
-# The canonical pinned preprocessing environment lives at the repository root.
--r ../../requirements_nd2_to_traj.txt

@@ -1,20 +1,2 @@
-# Core scientific Python stack
-numpy>=2.0,<3
-scipy>=1.13
-pandas>=2.2
-scikit-learn>=1.4
-
-# Image I/O and segmentation
-Pillow>=10.0
-tifffile>=2024.0
-nd2>=0.10
-dask[array]>=2024.1
-matplotlib>=3.8
-scikit-image>=0.22
-micro-sam>=1.0
-
-# Trajectory-to-feature modeling
-torch>=2.1
-
-# Notebook workflows
-jupyterlab>=4.0
+# Complete Python dependency entry point for the current extraction repository.
+-r requirements_nd2_to_traj.txt

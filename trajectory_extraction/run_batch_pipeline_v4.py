@@ -60,6 +60,8 @@ def scientific_options(args: argparse.Namespace) -> dict:
         "red_harvest_radius_um": args.red_harvest_radius_um,
         "red_min_track_points": args.red_min_track_points,
         "red_min_shared_frames": args.red_min_shared_frames,
+        "red_min_movie_coverage_fraction": args.red_min_movie_coverage_fraction,
+        "red_max_missing_frames": args.red_max_missing_frames,
         "red_uniqueness_margin_px": args.red_uniqueness_margin_px,
         "roi_dilation_px": args.roi_dilation_px,
         "d_star": args.d_star,
